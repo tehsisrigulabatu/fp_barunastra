@@ -1,0 +1,634 @@
+<?xml version="1.0" ?>
+
+<sdf version="1.9">
+  <world name="pengiriman_kapal_otonom">
+
+    <physics name="4ms" type="dart">
+      <max_step_size>0.004</max_step_size>
+      <real_time_factor>1.0</real_time_factor>
+    </physics>
+
+    <gui fullscreen="0">
+
+      <!-- 3D scene -->
+      <plugin filename="MinimalScene" name="3D View">
+        <gz-gui>
+          <title>3D View</title>
+          <property type="bool" key="showTitleBar">false</property>
+          <property type="string" key="state">docked</property>
+        </gz-gui>
+
+        <engine>ogre2</engine>
+        <scene>scene</scene>
+        <ambient_light>0.4 0.4 0.4</ambient_light>
+        <background_color>0.8 0.8 0.8</background_color>
+        <camera_pose>-8.40 -9.00 10.00 0 0.62 1.1</camera_pose>
+        <camera_clip>
+          <near>0.25</near>
+          <far>10000</far>
+        </camera_clip>
+      </plugin>
+
+      <!-- Plugins that add functionality to the scene -->
+      <plugin filename="EntityContextMenuPlugin" name="Entity context menu">
+        <gz-gui>
+          <property key="state" type="string">floating</property>
+          <property key="width" type="double">5</property>
+          <property key="height" type="double">5</property>
+          <property key="showTitleBar" type="bool">false</property>
+        </gz-gui>
+      </plugin>
+      <plugin filename="GzSceneManager" name="Scene Manager">
+        <gz-gui>
+          <property key="resizable" type="bool">false</property>
+          <property key="width" type="double">5</property>
+          <property key="height" type="double">5</property>
+          <property key="state" type="string">floating</property>
+          <property key="showTitleBar" type="bool">false</property>
+        </gz-gui>
+      </plugin>
+      <plugin filename="InteractiveViewControl" name="Interactive view control">
+        <gz-gui>
+          <property key="resizable" type="bool">false</property>
+          <property key="width" type="double">5</property>
+          <property key="height" type="double">5</property>
+          <property key="state" type="string">floating</property>
+          <property key="showTitleBar" type="bool">false</property>
+        </gz-gui>
+      </plugin>
+      <plugin filename="CameraTracking" name="Camera Tracking">
+        <gz-gui>
+          <property key="resizable" type="bool">false</property>
+          <property key="width" type="double">5</property>
+          <property key="height" type="double">5</property>
+          <property key="state" type="string">floating</property>
+          <property key="showTitleBar" type="bool">false</property>
+        </gz-gui>
+      </plugin>
+      <plugin filename="MarkerManager" name="Marker manager">
+        <gz-gui>
+          <property key="resizable" type="bool">false</property>
+          <property key="width" type="double">5</property>
+          <property key="height" type="double">5</property>
+          <property key="state" type="string">floating</property>
+          <property key="showTitleBar" type="bool">false</property>
+        </gz-gui>
+      </plugin>
+      <plugin filename="SelectEntities" name="Select Entities">
+        <gz-gui>
+          <anchors target="Select entities">
+            <line own="right" target="right"/>
+            <line own="top" target="top"/>
+          </anchors>
+          <property key="resizable" type="bool">false</property>
+          <property key="width" type="double">5</property>
+          <property key="height" type="double">5</property>
+          <property key="state" type="string">floating</property>
+          <property key="showTitleBar" type="bool">false</property>
+        </gz-gui>
+      </plugin>
+      <plugin filename="VisualizationCapabilities" name="Visualization Capabilities">
+        <gz-gui>
+          <property key="resizable" type="bool">false</property>
+          <property key="width" type="double">5</property>
+          <property key="height" type="double">5</property>
+          <property key="state" type="string">floating</property>
+          <property key="showTitleBar" type="bool">false</property>
+        </gz-gui>
+      </plugin>
+
+      <plugin filename="Spawn" name="Spawn Entities">
+        <gz-gui>
+          <anchors target="Select entities">
+            <line own="right" target="right"/>
+            <line own="top" target="top"/>
+          </anchors>
+          <property key="resizable" type="bool">false</property>
+          <property key="width" type="double">5</property>
+          <property key="height" type="double">5</property>
+          <property key="state" type="string">floating</property>
+          <property key="showTitleBar" type="bool">false</property>
+        </gz-gui>
+      </plugin>
+
+      <!-- World control -->
+      <plugin filename="WorldControl" name="World control">
+        <gz-gui>
+          <title>World control</title>
+          <property type="bool" key="showTitleBar">false</property>
+          <property type="bool" key="resizable">false</property>
+          <property type="double" key="height">72</property>
+          <property type="double" key="width">121</property>
+          <property type="double" key="z">1</property>
+
+          <property type="string" key="state">floating</property>
+          <anchors target="3D View">
+            <line own="left" target="left"/>
+            <line own="bottom" target="bottom"/>
+          </anchors>
+        </gz-gui>
+
+        <play_pause>true</play_pause>
+        <step>true</step>
+        <start_paused>false</start_paused>
+        <use_event>true</use_event>
+
+      </plugin>
+
+      <!-- World statistics -->
+      <plugin filename="WorldStats" name="World stats">
+        <gz-gui>
+          <title>World stats</title>
+          <property type="bool" key="showTitleBar">false</property>
+          <property type="bool" key="resizable">false</property>
+          <property type="double" key="height">110</property>
+          <property type="double" key="width">290</property>
+          <property type="double" key="z">1</property>
+
+          <property type="string" key="state">floating</property>
+          <anchors target="3D View">
+            <line own="right" target="right"/>
+            <line own="bottom" target="bottom"/>
+          </anchors>
+        </gz-gui>
+
+        <sim_time>true</sim_time>
+        <real_time>true</real_time>
+        <real_time_factor>true</real_time_factor>
+        <iterations>true</iterations>
+      </plugin>
+
+      <!-- Insert simple shapes -->
+      <plugin filename="Shapes" name="Shapes">
+        <gz-gui>
+          <property key="resizable" type="bool">false</property>
+          <property key="x" type="double">0</property>
+          <property key="y" type="double">0</property>
+          <property key="width" type="double">250</property>
+          <property key="height" type="double">50</property>
+          <property key="state" type="string">floating</property>
+          <property key="showTitleBar" type="bool">false</property>
+          <property key="cardBackground" type="string">#666666</property>
+        </gz-gui>
+      </plugin>
+
+      <!-- Insert lights -->
+      <plugin filename="Lights" name="Lights">
+        <gz-gui>
+          <property key="resizable" type="bool">false</property>
+          <property key="x" type="double">250</property>
+          <property key="y" type="double">0</property>
+          <property key="width" type="double">150</property>
+          <property key="height" type="double">50</property>
+          <property key="state" type="string">floating</property>
+          <property key="showTitleBar" type="bool">false</property>
+          <property key="cardBackground" type="string">#666666</property>
+        </gz-gui>
+      </plugin>
+
+      <!-- Translate / rotate -->
+      <plugin filename="TransformControl" name="Transform control">
+        <gz-gui>
+          <property key="resizable" type="bool">false</property>
+          <property key="x" type="double">0</property>
+          <property key="y" type="double">50</property>
+          <property key="width" type="double">250</property>
+          <property key="height" type="double">50</property>
+          <property key="state" type="string">floating</property>
+          <property key="showTitleBar" type="bool">false</property>
+          <property key="cardBackground" type="string">#777777</property>
+        </gz-gui>
+
+        <!-- disable legacy features used to connect this plugin to GzScene3D -->
+        <legacy>false</legacy>
+      </plugin>
+
+      <!-- Screenshot -->
+      <plugin filename="Screenshot" name="Screenshot">
+        <gz-gui>
+          <property key="resizable" type="bool">false</property>
+          <property key="x" type="double">250</property>
+          <property key="y" type="double">50</property>
+          <property key="width" type="double">50</property>
+          <property key="height" type="double">50</property>
+          <property key="state" type="string">floating</property>
+          <property key="showTitleBar" type="bool">false</property>
+          <property key="cardBackground" type="string">#777777</property>
+        </gz-gui>
+      </plugin>
+
+      <!-- Video recorder -->
+      <plugin filename="VideoRecorder" name="VideoRecorder">
+        <gz-gui>
+          <property key="resizable" type="bool">false</property>
+          <property key="x" type="double">300</property>
+          <property key="y" type="double">50</property>
+          <property key="width" type="double">50</property>
+          <property key="height" type="double">50</property>
+          <property key="state" type="string">floating</property>
+          <property key="showTitleBar" type="bool">false</property>
+          <property key="cardBackground" type="string">#777777</property>
+        </gz-gui>
+
+        <record_video>
+          <use_sim_time>true</use_sim_time>
+          <lockstep>true</lockstep>
+          <bitrate>4000000</bitrate>
+        </record_video>
+
+        <!-- disable legacy features used to connect this plugin to GzScene3D -->
+        <legacy>false</legacy>
+      </plugin>
+
+      <!-- Inspector -->
+      <plugin filename="ComponentInspector" name="Component inspector">
+        <gz-gui>
+          <property type="string" key="state">docked_collapsed</property>
+        </gz-gui>
+      </plugin>
+
+      <!-- Entity tree -->
+      <plugin filename="EntityTree" name="Entity tree">
+        <gz-gui>
+          <property type="string" key="state">docked_collapsed</property>
+        </gz-gui>
+      </plugin>
+
+      <!-- View angle -->
+      <plugin filename="ViewAngle" name="View angle">
+        <gz-gui>
+          <property type="string" key="state">docked_collapsed</property>
+        </gz-gui>
+
+        <!-- disable legacy features used to connect this plugin to GzScene3D -->
+        <legacy>false</legacy>
+      </plugin>
+
+    </gui>
+
+    <plugin
+      filename="gz-sim-physics-system"
+      name="gz::sim::systems::Physics">
+    </plugin>
+    <plugin
+      filename="gz-sim-user-commands-system"
+      name="gz::sim::systems::UserCommands">
+    </plugin>
+    <plugin
+      filename="gz-sim-sensors-system"
+      name="gz::sim::systems::Sensors">
+      <render_engine>ogre2</render_engine>
+      <disable_on_drained_battery>true</disable_on_drained_battery>
+    </plugin>
+    <plugin
+      filename="gz-sim-imu-system"
+      name="gz::sim::systems::Imu">
+    </plugin>
+    <plugin
+      filename="gz-sim-magnetometer-system"
+      name="gz::sim::systems::Magnetometer">
+    </plugin>
+    <plugin
+      filename="gz-sim-forcetorque-system"
+      name="gz::sim::systems::ForceTorque">
+    </plugin>
+    <plugin
+      filename="gz-sim-particle-emitter-system"
+      name="gz::sim::systems::ParticleEmitter">
+    </plugin>
+    <plugin
+      filename="gz-sim-scene-broadcaster-system"
+      name="gz::sim::systems::SceneBroadcaster">
+    </plugin>
+    <plugin
+      filename="gz-sim-contact-system"
+      name="gz::sim::systems::Contact">
+    </plugin>
+    <plugin
+      filename="gz-sim-navsat-system"
+      name="gz::sim::systems::NavSat">
+    </plugin>
+    <scene>
+      <sky></sky>
+      <grid>false</grid>
+      <ambient>1.0 1.0 1.0</ambient>
+      <background>0.8 0.8 0.8</background>
+    </scene>
+
+    <!-- Estimated latitude/longitude of sydneyregatta
+         from satellite imagery -->
+    <spherical_coordinates>
+      <surface_model>EARTH_WGS84</surface_model>
+      <world_frame_orientation>ENU</world_frame_orientation>
+      <latitude_deg>-33.724223</latitude_deg>
+      <longitude_deg>150.679736</longitude_deg>
+      <elevation>0.0</elevation>
+      <heading_deg>0.0</heading_deg>
+    </spherical_coordinates>
+
+    <light type="directional" name="sun">
+      <cast_shadows>true</cast_shadows>
+      <pose>0 0 10 0 0 0</pose>
+      <diffuse>0.8 0.8 0.8 1</diffuse>
+      <specular>0.2 0.2 0.2 1</specular>
+      <attenuation>
+        <range>1000</range>
+        <constant>0.9</constant>
+        <linear>0.01</linear>
+        <quadratic>0.001</quadratic>
+      </attenuation>
+      <direction>-0.5 0.1 -0.9</direction>
+    </light>
+
+    <include>
+      <name>Coast Waves</name>
+      <pose>0 0 0 0 0 0</pose>
+      <uri>coast_waves</uri>
+    </include>
+
+    <plugin filename="libPublisherPlugin.so" name="vrx::PublisherPlugin">
+      <message type="gz.msgs.Param" topic="/vrx/wavefield/parameters" every="2.0">
+        params { key: "direction" value { type: DOUBLE double_value: 0.0 } }
+        params { key: "gain" value { type: DOUBLE double_value: 0.0 } }
+        params { key: "period" value { type: DOUBLE double_value: 5 } }
+        params { key: "steepness" value { type: DOUBLE double_value: 0 } }
+      </message>
+    </plugin>
+
+    <!-- ===== ARENA (dihasilkan make_world.py, skala 1.00) ===== -->
+    <model name="spot1_dock_back">
+      <static>true</static>
+      <pose>-11.2500 0.0000 0.0500 0 0 0.0</pose>
+      <link name="link">
+        <visual name="v0"><pose>0.0000 0.0000 0.0000 0 0 0</pose><geometry><box><size>1.5000 4.0000 0.4000</size></box></geometry><material><ambient>0.55 0.43 0.31 1.0</ambient><diffuse>0.55 0.43 0.31 1.0</diffuse></material></visual>
+        <collision name="c0"><pose>0.0000 0.0000 0.0000 0 0 0</pose><geometry><box><size>1.5000 4.0000 0.4000</size></box></geometry></collision>
+      </link>
+    </model>
+    <model name="spot1_dock_left">
+      <static>true</static>
+      <pose>-9.7500 1.3000 0.0500 0 0 0.0</pose>
+      <link name="link">
+        <visual name="v0"><pose>0.0000 0.0000 0.0000 0 0 0</pose><geometry><box><size>1.5000 1.4000 0.4000</size></box></geometry><material><ambient>0.55 0.43 0.31 1.0</ambient><diffuse>0.55 0.43 0.31 1.0</diffuse></material></visual>
+        <collision name="c0"><pose>0.0000 0.0000 0.0000 0 0 0</pose><geometry><box><size>1.5000 1.4000 0.4000</size></box></geometry></collision>
+      </link>
+    </model>
+    <model name="spot1_dock_right">
+      <static>true</static>
+      <pose>-9.7500 -1.3000 0.0500 0 0 0.0</pose>
+      <link name="link">
+        <visual name="v0"><pose>0.0000 0.0000 0.0000 0 0 0</pose><geometry><box><size>1.5000 1.4000 0.4000</size></box></geometry><material><ambient>0.55 0.43 0.31 1.0</ambient><diffuse>0.55 0.43 0.31 1.0</diffuse></material></visual>
+        <collision name="c0"><pose>0.0000 0.0000 0.0000 0 0 0</pose><geometry><box><size>1.5000 1.4000 0.4000</size></box></geometry></collision>
+      </link>
+    </model>
+    <model name="spot2_dock_back">
+      <static>true</static>
+      <pose>11.2500 0.0000 0.0500 0 0 0.0</pose>
+      <link name="link">
+        <visual name="v0"><pose>0.0000 0.0000 0.0000 0 0 0</pose><geometry><box><size>1.5000 4.0000 0.4000</size></box></geometry><material><ambient>0.55 0.43 0.31 1.0</ambient><diffuse>0.55 0.43 0.31 1.0</diffuse></material></visual>
+        <collision name="c0"><pose>0.0000 0.0000 0.0000 0 0 0</pose><geometry><box><size>1.5000 4.0000 0.4000</size></box></geometry></collision>
+      </link>
+    </model>
+    <model name="spot2_dock_left">
+      <static>true</static>
+      <pose>9.7500 1.3000 0.0500 0 0 0.0</pose>
+      <link name="link">
+        <visual name="v0"><pose>0.0000 0.0000 0.0000 0 0 0</pose><geometry><box><size>1.5000 1.4000 0.4000</size></box></geometry><material><ambient>0.55 0.43 0.31 1.0</ambient><diffuse>0.55 0.43 0.31 1.0</diffuse></material></visual>
+        <collision name="c0"><pose>0.0000 0.0000 0.0000 0 0 0</pose><geometry><box><size>1.5000 1.4000 0.4000</size></box></geometry></collision>
+      </link>
+    </model>
+    <model name="spot2_dock_right">
+      <static>true</static>
+      <pose>9.7500 -1.3000 0.0500 0 0 0.0</pose>
+      <link name="link">
+        <visual name="v0"><pose>0.0000 0.0000 0.0000 0 0 0</pose><geometry><box><size>1.5000 1.4000 0.4000</size></box></geometry><material><ambient>0.55 0.43 0.31 1.0</ambient><diffuse>0.55 0.43 0.31 1.0</diffuse></material></visual>
+        <collision name="c0"><pose>0.0000 0.0000 0.0000 0 0 0</pose><geometry><box><size>1.5000 1.4000 0.4000</size></box></geometry></collision>
+      </link>
+    </model>
+    <model name="spot1_banner">
+      <static>true</static>
+      <pose>-11.9200 0.0000 0.7000 0 0 0.0</pose>
+      <link name="link">
+        <visual name="v0"><pose>0.0000 0.0000 0.0000 0 0 0</pose><geometry><box><size>0.0400 1.0000 0.8000</size></box></geometry><material><ambient>0.95 0.95 0.95 1.0</ambient><diffuse>0.95 0.95 0.95 1.0</diffuse></material></visual>
+        <visual name="v1"><pose>0.0200 0.0000 0.0000 0 0 0</pose><geometry><box><size>0.0500 0.1200 0.6000</size></box></geometry><material><ambient>0.1 0.1 0.1 1.0</ambient><diffuse>0.1 0.1 0.1 1.0</diffuse></material></visual>
+        <visual name="v2"><pose>0.0200 0.0000 0.0000 0 0 0</pose><geometry><box><size>0.0500 0.6000 0.1200</size></box></geometry><material><ambient>0.1 0.1 0.1 1.0</ambient><diffuse>0.1 0.1 0.1 1.0</diffuse></material></visual>
+      </link>
+    </model>
+    <model name="spot2_banner">
+      <static>true</static>
+      <pose>11.9200 0.0000 0.7000 0 0 0.0</pose>
+      <link name="link">
+        <visual name="v0"><pose>0.0000 0.0000 0.0000 0 0 0</pose><geometry><box><size>0.0400 1.0000 0.8000</size></box></geometry><material><ambient>0.95 0.95 0.95 1.0</ambient><diffuse>0.95 0.95 0.95 1.0</diffuse></material></visual>
+        <visual name="v1"><pose>-0.0200 0.0000 -0.2500 0 0 0</pose><geometry><box><size>0.0500 0.6000 0.0400</size></box></geometry><material><ambient>0.1 0.1 0.1 1.0</ambient><diffuse>0.1 0.1 0.1 1.0</diffuse></material></visual>
+        <visual name="v2"><pose>-0.0200 -0.1500 0.0000 -0.5404 0 0</pose><geometry><box><size>0.0500 0.0400 0.5830</size></box></geometry><material><ambient>0.1 0.1 0.1 1.0</ambient><diffuse>0.1 0.1 0.1 1.0</diffuse></material></visual>
+        <visual name="v3"><pose>-0.0200 0.1500 0.0000 0.5404 0 0</pose><geometry><box><size>0.0500 0.0400 0.5830</size></box></geometry><material><ambient>0.1 0.1 0.1 1.0</ambient><diffuse>0.1 0.1 0.1 1.0</diffuse></material></visual>
+      </link>
+    </model>
+    <model name="start_marker">
+      <static>true</static>
+      <pose>-9.7500 0.0000 0.0120 0 0 0.0</pose>
+      <link name="link">
+        <visual name="v0"><pose>0.0000 0.0000 0.0000 0 0 0</pose><geometry><box><size>1.3000 1.0000 0.0100</size></box></geometry><material><ambient>0.75 0.85 0.95 1.0</ambient><diffuse>0.75 0.85 0.95 1.0</diffuse></material></visual>
+      </link>
+    </model>
+    <model name="item_cube">
+      <static>false</static>
+      <pose>-11.1000 0.0000 0.3250 0 0 0.0</pose>
+      <link name="link">
+        <inertial><mass>0.1500</mass><inertia><ixx>0.000562</ixx><iyy>0.000562</iyy><izz>0.000562</izz></inertia></inertial>
+        <visual name="v0"><pose>0.0000 0.0000 0.0000 0 0 0</pose><geometry><box><size>0.1500 0.1500 0.1500</size></box></geometry><material><ambient>0.95 0.76 0.19 1.0</ambient><diffuse>0.95 0.76 0.19 1.0</diffuse></material></visual>
+        <collision name="c0"><pose>0.0000 0.0000 0.0000 0 0 0</pose><geometry><box><size>0.1500 0.1500 0.1500</size></box></geometry></collision>
+      </link>
+    </model>
+    <model name="drop_mark_cube">
+      <static>true</static>
+      <pose>11.1000 0.0000 0.2550 0 0 0.0</pose>
+      <link name="link">
+        <visual name="v0"><pose>0.0000 0.0000 0.0000 0 0 0</pose><geometry><box><size>0.2400 0.2400 0.0100</size></box></geometry><material><ambient>0.95 0.95 0.95 1.0</ambient><diffuse>0.95 0.95 0.95 1.0</diffuse></material></visual>
+      </link>
+    </model>
+    <model name="item_sphere">
+      <static>false</static>
+      <pose>-9.8000 1.0000 0.3250 0 0 0.0</pose>
+      <link name="link">
+        <inertial><mass>0.1500</mass><inertia><ixx>0.000562</ixx><iyy>0.000562</iyy><izz>0.000562</izz></inertia></inertial>
+        <visual name="v0"><pose>0.0000 0.0000 0.0000 0 0 0</pose><geometry><sphere><radius>0.0750</radius></sphere></geometry><material><ambient>0.95 0.76 0.19 1.0</ambient><diffuse>0.95 0.76 0.19 1.0</diffuse></material></visual>
+        <collision name="c0"><pose>0.0000 0.0000 0.0000 0 0 0</pose><geometry><sphere><radius>0.0750</radius></sphere></geometry></collision>
+      </link>
+    </model>
+    <model name="drop_mark_sphere">
+      <static>true</static>
+      <pose>9.8000 1.0000 0.2550 0 0 0.0</pose>
+      <link name="link">
+        <visual name="v0"><pose>0.0000 0.0000 0.0000 0 0 0</pose><geometry><box><size>0.2400 0.2400 0.0100</size></box></geometry><material><ambient>0.95 0.95 0.95 1.0</ambient><diffuse>0.95 0.95 0.95 1.0</diffuse></material></visual>
+      </link>
+    </model>
+    <model name="item_prism">
+      <static>false</static>
+      <pose>-9.8000 -1.0000 0.3250 0 0 0.0</pose>
+      <link name="link">
+        <inertial><mass>0.1500</mass><inertia><ixx>0.000562</ixx><iyy>0.000562</iyy><izz>0.000562</izz></inertia></inertial>
+        <visual name="v0"><pose>0.0000 0.0750 -0.0750 1.5708 0 0</pose><geometry><polyline><point>-0.0750 0</point><point>0.0750 0</point><point>0 0.1500</point><height>0.1500</height></polyline></geometry><material><ambient>0.95 0.76 0.19 1.0</ambient><diffuse>0.95 0.76 0.19 1.0</diffuse></material></visual>
+        <collision name="c0"><pose>0.0000 0.0750 -0.0750 1.5708 0 0</pose><geometry><polyline><point>-0.0750 0</point><point>0.0750 0</point><point>0 0.1500</point><height>0.1500</height></polyline></geometry></collision>
+      </link>
+    </model>
+    <model name="drop_mark_prism">
+      <static>true</static>
+      <pose>9.8000 -1.0000 0.2550 0 0 0.0</pose>
+      <link name="link">
+        <visual name="v0"><pose>0.0000 0.0000 0.0000 0 0 0</pose><geometry><box><size>0.2400 0.2400 0.0100</size></box></geometry><material><ambient>0.95 0.95 0.95 1.0</ambient><diffuse>0.95 0.95 0.95 1.0</diffuse></material></visual>
+      </link>
+    </model>
+    <model name="gate1_green">
+      <static>true</static>
+      <pose>-6.0000 1.6000 0.1050 0 0 0.0</pose>
+      <link name="link">
+        <visual name="v0"><pose>0.0000 0.0000 0.0000 0 0 0</pose><geometry><sphere><radius>0.1500</radius></sphere></geometry><material><ambient>0.18 0.62 0.31 1.0</ambient><diffuse>0.18 0.62 0.31 1.0</diffuse></material></visual>
+        <collision name="c0"><pose>0.0000 0.0000 0.0000 0 0 0</pose><geometry><sphere><radius>0.1500</radius></sphere></geometry></collision>
+      </link>
+    </model>
+    <model name="gate1_red">
+      <static>true</static>
+      <pose>-6.0000 -0.4000 0.1050 0 0 0.0</pose>
+      <link name="link">
+        <visual name="v0"><pose>0.0000 0.0000 0.0000 0 0 0</pose><geometry><sphere><radius>0.1500</radius></sphere></geometry><material><ambient>0.82 0.2 0.17 1.0</ambient><diffuse>0.82 0.2 0.17 1.0</diffuse></material></visual>
+        <collision name="c0"><pose>0.0000 0.0000 0.0000 0 0 0</pose><geometry><sphere><radius>0.1500</radius></sphere></geometry></collision>
+      </link>
+    </model>
+    <model name="lane2_green">
+      <static>true</static>
+      <pose>-3.0000 1.7500 0.1050 0 0 0.0</pose>
+      <link name="link">
+        <visual name="v0"><pose>0.0000 0.0000 0.0000 0 0 0</pose><geometry><sphere><radius>0.1500</radius></sphere></geometry><material><ambient>0.18 0.62 0.31 1.0</ambient><diffuse>0.18 0.62 0.31 1.0</diffuse></material></visual>
+        <collision name="c0"><pose>0.0000 0.0000 0.0000 0 0 0</pose><geometry><sphere><radius>0.1500</radius></sphere></geometry></collision>
+      </link>
+    </model>
+    <model name="lane2_red">
+      <static>true</static>
+      <pose>-3.0000 -1.7500 0.1050 0 0 0.0</pose>
+      <link name="link">
+        <visual name="v0"><pose>0.0000 0.0000 0.0000 0 0 0</pose><geometry><sphere><radius>0.1500</radius></sphere></geometry><material><ambient>0.82 0.2 0.17 1.0</ambient><diffuse>0.82 0.2 0.17 1.0</diffuse></material></visual>
+        <collision name="c0"><pose>0.0000 0.0000 0.0000 0 0 0</pose><geometry><sphere><radius>0.1500</radius></sphere></geometry></collision>
+      </link>
+    </model>
+    <model name="gate3_green">
+      <static>true</static>
+      <pose>0.0000 0.1500 0.1050 0 0 0.0</pose>
+      <link name="link">
+        <visual name="v0"><pose>0.0000 0.0000 0.0000 0 0 0</pose><geometry><sphere><radius>0.1500</radius></sphere></geometry><material><ambient>0.18 0.62 0.31 1.0</ambient><diffuse>0.18 0.62 0.31 1.0</diffuse></material></visual>
+        <collision name="c0"><pose>0.0000 0.0000 0.0000 0 0 0</pose><geometry><sphere><radius>0.1500</radius></sphere></geometry></collision>
+      </link>
+    </model>
+    <model name="gate3_red">
+      <static>true</static>
+      <pose>0.0000 -1.3500 0.1050 0 0 0.0</pose>
+      <link name="link">
+        <visual name="v0"><pose>0.0000 0.0000 0.0000 0 0 0</pose><geometry><sphere><radius>0.1500</radius></sphere></geometry><material><ambient>0.82 0.2 0.17 1.0</ambient><diffuse>0.82 0.2 0.17 1.0</diffuse></material></visual>
+        <collision name="c0"><pose>0.0000 0.0000 0.0000 0 0 0</pose><geometry><sphere><radius>0.1500</radius></sphere></geometry></collision>
+      </link>
+    </model>
+    <model name="lane4_green">
+      <static>true</static>
+      <pose>3.0000 1.7500 0.1050 0 0 0.0</pose>
+      <link name="link">
+        <visual name="v0"><pose>0.0000 0.0000 0.0000 0 0 0</pose><geometry><sphere><radius>0.1500</radius></sphere></geometry><material><ambient>0.18 0.62 0.31 1.0</ambient><diffuse>0.18 0.62 0.31 1.0</diffuse></material></visual>
+        <collision name="c0"><pose>0.0000 0.0000 0.0000 0 0 0</pose><geometry><sphere><radius>0.1500</radius></sphere></geometry></collision>
+      </link>
+    </model>
+    <model name="lane4_red">
+      <static>true</static>
+      <pose>3.0000 -1.7500 0.1050 0 0 0.0</pose>
+      <link name="link">
+        <visual name="v0"><pose>0.0000 0.0000 0.0000 0 0 0</pose><geometry><sphere><radius>0.1500</radius></sphere></geometry><material><ambient>0.82 0.2 0.17 1.0</ambient><diffuse>0.82 0.2 0.17 1.0</diffuse></material></visual>
+        <collision name="c0"><pose>0.0000 0.0000 0.0000 0 0 0</pose><geometry><sphere><radius>0.1500</radius></sphere></geometry></collision>
+      </link>
+    </model>
+    <model name="gate5_green">
+      <static>true</static>
+      <pose>6.0000 1.6000 0.1050 0 0 0.0</pose>
+      <link name="link">
+        <visual name="v0"><pose>0.0000 0.0000 0.0000 0 0 0</pose><geometry><sphere><radius>0.1500</radius></sphere></geometry><material><ambient>0.18 0.62 0.31 1.0</ambient><diffuse>0.18 0.62 0.31 1.0</diffuse></material></visual>
+        <collision name="c0"><pose>0.0000 0.0000 0.0000 0 0 0</pose><geometry><sphere><radius>0.1500</radius></sphere></geometry></collision>
+      </link>
+    </model>
+    <model name="gate5_red">
+      <static>true</static>
+      <pose>6.0000 -0.4000 0.1050 0 0 0.0</pose>
+      <link name="link">
+        <visual name="v0"><pose>0.0000 0.0000 0.0000 0 0 0</pose><geometry><sphere><radius>0.1500</radius></sphere></geometry><material><ambient>0.82 0.2 0.17 1.0</ambient><diffuse>0.82 0.2 0.17 1.0</diffuse></material></visual>
+        <collision name="c0"><pose>0.0000 0.0000 0.0000 0 0 0</pose><geometry><sphere><radius>0.1500</radius></sphere></geometry></collision>
+      </link>
+    </model>
+    <model name="obstacle1_yellow">
+      <static>true</static>
+      <pose>-4.5000 0.8000 0.1540 0 0 0.0</pose>
+      <link name="link">
+        <visual name="v0"><pose>0.0000 0.0000 0.0000 0 0 0</pose><geometry><sphere><radius>0.2200</radius></sphere></geometry><material><ambient>0.95 0.76 0.19 1.0</ambient><diffuse>0.95 0.76 0.19 1.0</diffuse></material></visual>
+        <collision name="c0"><pose>0.0000 0.0000 0.0000 0 0 0</pose><geometry><sphere><radius>0.2200</radius></sphere></geometry></collision>
+      </link>
+    </model>
+    <model name="obstacle2_black">
+      <static>true</static>
+      <pose>-1.5000 -0.8750 0.1540 0 0 0.0</pose>
+      <link name="link">
+        <visual name="v0"><pose>0.0000 0.0000 0.0000 0 0 0</pose><geometry><sphere><radius>0.2200</radius></sphere></geometry><material><ambient>0.1 0.1 0.1 1.0</ambient><diffuse>0.1 0.1 0.1 1.0</diffuse></material></visual>
+        <collision name="c0"><pose>0.0000 0.0000 0.0000 0 0 0</pose><geometry><sphere><radius>0.2200</radius></sphere></geometry></collision>
+      </link>
+    </model>
+    <model name="obstacle3_black">
+      <static>true</static>
+      <pose>1.5000 0.1250 0.1540 0 0 0.0</pose>
+      <link name="link">
+        <visual name="v0"><pose>0.0000 0.0000 0.0000 0 0 0</pose><geometry><sphere><radius>0.2200</radius></sphere></geometry><material><ambient>0.1 0.1 0.1 1.0</ambient><diffuse>0.1 0.1 0.1 1.0</diffuse></material></visual>
+        <collision name="c0"><pose>0.0000 0.0000 0.0000 0 0 0</pose><geometry><sphere><radius>0.2200</radius></sphere></geometry></collision>
+      </link>
+    </model>
+    <model name="obstacle4_yellow">
+      <static>true</static>
+      <pose>4.5000 -0.2000 0.1540 0 0 0.0</pose>
+      <link name="link">
+        <visual name="v0"><pose>0.0000 0.0000 0.0000 0 0 0</pose><geometry><sphere><radius>0.2200</radius></sphere></geometry><material><ambient>0.95 0.76 0.19 1.0</ambient><diffuse>0.95 0.76 0.19 1.0</diffuse></material></visual>
+        <collision name="c0"><pose>0.0000 0.0000 0.0000 0 0 0</pose><geometry><sphere><radius>0.2200</radius></sphere></geometry></collision>
+      </link>
+    </model>
+    <model name="edge_n">
+      <static>true</static>
+      <pose>0.0000 6.0000 0.0200 0 0 0.0</pose>
+      <link name="link">
+        <visual name="v0"><pose>0.0000 0.0000 0.0000 0 0 0</pose><geometry><box><size>24.0000 0.1000 0.0300</size></box></geometry><material><ambient>0.95 0.95 0.95 1.0</ambient><diffuse>0.95 0.95 0.95 1.0</diffuse></material></visual>
+      </link>
+    </model>
+    <model name="edge_s">
+      <static>true</static>
+      <pose>0.0000 -6.0000 0.0200 0 0 0.0</pose>
+      <link name="link">
+        <visual name="v0"><pose>0.0000 0.0000 0.0000 0 0 0</pose><geometry><box><size>24.0000 0.1000 0.0300</size></box></geometry><material><ambient>0.95 0.95 0.95 1.0</ambient><diffuse>0.95 0.95 0.95 1.0</diffuse></material></visual>
+      </link>
+    </model>
+    <model name="edge_w">
+      <static>true</static>
+      <pose>-12.0000 0.0000 0.0200 0 0 0.0</pose>
+      <link name="link">
+        <visual name="v0"><pose>0.0000 0.0000 0.0000 0 0 0</pose><geometry><box><size>0.1000 12.0000 0.0300</size></box></geometry><material><ambient>0.95 0.95 0.95 1.0</ambient><diffuse>0.95 0.95 0.95 1.0</diffuse></material></visual>
+      </link>
+    </model>
+    <model name="edge_e">
+      <static>true</static>
+      <pose>12.0000 0.0000 0.0200 0 0 0.0</pose>
+      <link name="link">
+        <visual name="v0"><pose>0.0000 0.0000 0.0000 0 0 0</pose><geometry><box><size>0.1000 12.0000 0.0300</size></box></geometry><material><ambient>0.95 0.95 0.95 1.0</ambient><diffuse>0.95 0.95 0.95 1.0</diffuse></material></visual>
+      </link>
+    </model>
+    <model name="overview_camera">
+      <static>true</static>
+      <pose>0 0 20.000 0 1.5708 1.5708</pose>
+      <link name="link">
+        <sensor name="camera" type="camera">
+          <camera><horizontal_fov>1.2</horizontal_fov><image><width>1280</width><height>720</height></image><clip><near>0.1</near><far>100</far></clip></camera>
+          <always_on>1</always_on><update_rate>10</update_rate><visualize>false</visualize>
+          <topic>overview_camera/image</topic>
+        </sensor>
+      </link>
+    </model>
+
+  </world>
+</sdf>
