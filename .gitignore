@@ -1,0 +1,13 @@
+dataset/
+
+model/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# ROS 2 Colcon build artifacts
+build/
+install/
+log/
