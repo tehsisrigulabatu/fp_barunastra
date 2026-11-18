@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
 import math
+import sys
+import time
+import threading
 from collections import deque
 import cv2
 import numpy as np
@@ -10,22 +13,26 @@ from std_msgs.msg import Float64
 from cv_bridge import CvBridge
 from ultralytics import YOLO
 
-# ===================== KONFIGURASI UTAMA =====================
+sys.path.insert(0, '/home/alpro/fp3d_ws/src/arena-vrx')
+from lengan import Arm, wait_pose
+
+# ===================== KONFIGURASI UTAMA (TUNED FOR LOADED CARGO) =====================
 MODEL_PATH = '/home/alpro/fp3d_ws/src/arena-vrx/dataset/model/frontnav.pt'
+ARM_MODEL_PATH = '/home/alpro/fp3d_ws/src/arena-vrx/dataset/model/arm.pt'
 HFOV = 1.047              # rad, fallback jika camera_info belum masuk
-DOCK_PX_OFFSET = 30.0     # px, offset titik bidik akhir ke banner/slot
+DOCK_PX_OFFSET = 0.0      # px, lurus tepat ke tengah banner Spot 2
 
-# Kecepatan & Kontrol Kemudi (halus untuk arena 18m & gate 1.5m - 2.0m)
-BASE_SPEED = 60.0         # thrust maju normal
-MIN_SPEED = 38.0          # thrust maju saat belok tajam
-KP_STEER = 135.0          # gain belok proporsional terhadap sudut target (rad)
-MAX_TURN = 85.0           # batas maksimum diferensial thrust kiri-kanan
+# Kecepatan & Kontrol Kemudi (lebih kalem tapi torsi belok lebih sigap karena bawa beban)
+BASE_SPEED = 48.0         # thrust maju normal (diturunkan dari 60 agar sempat belok)
+MIN_SPEED = 26.0          # thrust maju saat belok tajam / hindar obstacle
+KP_STEER = 175.0          # gain belok lebih responsif melawan inersia muatan
+MAX_TURN = 105.0          # torsi diferensial maksimum untuk belok tajam
 
-# Margin sudut aman (dalam radian) diukur dari lebar layar
-BUOY_MARGIN_RAD = 0.14    # ~8 derajat aman dari buoy hijau/merah
-OBS_MARGIN_RAD = 0.22     # ~12.5 derajat aman dari obstacle kuning/hitam
-OBS_ACTIVE_Y = 0.38       # mulai hindari obstacle saat y2/h > 0.38 (sudah masuk arena dekat)
-OBS_PASS_Y = 0.88         # obstacle di bawah y2/h > 0.88 sudah di samping lambung
+# Margin sudut aman & deteksi dini ("tau diri" bawa muatan lebar)
+BUOY_MARGIN_RAD = 0.19    # ~11 deg ruang aman dari buoy hijau/merah
+OBS_MARGIN_RAD = 0.30     # ~17 deg ruang aman dari obstacle kuning/hitam
+OBS_ACTIVE_Y = 0.25       # mulai menghindar JAUH lebih awal (sebelumnya 0.38)
+OBS_PASS_Y = 0.90         # tetap waspada sampai obstacle benar-benar melewati lambung
 
 # Deteksi stuck / nabrak
 STUCK_WIN = 2.0
@@ -38,17 +45,20 @@ class ASV(Node):
         super().__init__('asv_vision_only')
         self.bridge = CvBridge()
         self.model = YOLO(MODEL_PATH)
-        self.get_logger().info(f"Classes: {self.model.names}")
+        self.arm_model = YOLO(ARM_MODEL_PATH)
+        self.get_logger().info(f"Front Classes: {self.model.names}")
+        self.get_logger().info(f"Arm Classes: {self.arm_model.names}")
 
         self.declare_parameter('camera_topic',
                                '/wamv/sensors/cameras/front_left_camera_sensor/image_raw')
-        self.declare_parameter('cam_angle_offset', -0.06)  # kompensasi posisi kamera front_left
+        self.declare_parameter('cam_angle_offset', -0.06)
         self.cam_offset = float(self.get_parameter('cam_angle_offset').value)
 
         cam_topic = self.get_parameter('camera_topic').value
         self.create_subscription(Image, cam_topic, self.cam_cb, 10)
         self.create_subscription(CameraInfo, cam_topic.replace('image_raw', 'camera_info'),
                                  self.info_cb, 10)
+        self.create_subscription(Image, '/arm/camera/image', self.arm_cam_cb, 1)
 
         self.pub_l = self.create_publisher(Float64, '/wamv/thrusters/left/thrust', 10)
         self.pub_r = self.create_publisher(Float64, '/wamv/thrusters/right/thrust', 10)
@@ -63,11 +73,11 @@ class ASV(Node):
         self.docked = False
         self.brake = 0
 
-        # Memori arah hindar untuk obstacle yang sedang aktif (mencegah ragu-ragu kanan/kiri)
-        self.locked_avoid_dir = None   # 'R' atau 'L'
+        # Memori arah hindar obstacle
+        self.locked_avoid_dir = None
         self.obs_lost_frames = 0
 
-        # Memori dinding terakhir jika kamera sempat kosong sesaat
+        # Memori dinding terakhir
         self.last_seen_t = self.now()
         self.last_target_ang = 0.0
 
@@ -77,7 +87,19 @@ class ASV(Node):
         self.motion = 0.0
         self.still = 0
 
-        self.get_logger().info("=== asv_vision_only v10-ANGULAR-CORRIDOR STARTED ===")
+        # State lengan & misi: 'PICKUP' -> 'NAVIGATE' -> 'DROP' -> 'DONE'
+        self.arm = Arm()
+        self.arm_dets = {}
+        self.arm_frame_size = (640, 480)
+        self.arm_yaw = 0.0
+        self.arm_slide = 0.9
+        self.arm_lift = 0.0
+        self.mission_phase = 'PICKUP'
+        self.drop_started = False
+        self.grabbed_items = []
+
+        threading.Thread(target=self.pickup_routine, daemon=True).start()
+        self.get_logger().info("=== asv_vision_only LOADED-TUNED MISSION STARTED ===")
 
     # ------------------------------------------------------------------
     def now(self):
@@ -120,7 +142,7 @@ class ASV(Node):
             if len(ds) >= 2:
                 self.motion = sum(ds) / len(ds)
                 cmd = (self.last_cmd[0] + self.last_cmd[1]) / 2.0
-                if (cmd > 45 and now - self.t0 > STUCK_GRACE and self.motion < STUCK_PX
+                if (cmd > 35 and now - self.t0 > STUCK_GRACE and self.motion < STUCK_PX
                         and not self.docked and self.brake == 0):
                     self.still += 1
                 else:
@@ -156,7 +178,178 @@ class ASV(Node):
         cv2.imshow('ASV', img)
         cv2.waitKey(1)
 
-    # ------------------------------------------------------------------
+    # ===================== KONTROL LENGAN ULTRA-HALUS (SUDAH WORK!) =====================
+    def arm_cam_cb(self, msg):
+        frame = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
+        h, w, _ = frame.shape
+        self.arm_frame_size = (w, h)
+        ann = frame.copy()
+
+        res = self.arm_model(frame, conf=0.25, verbose=False)[0]
+        dets = {}
+        for b in res.boxes:
+            raw_name = self.arm_model.names[int(b.cls[0])].lower()
+            conf = float(b.conf[0])
+            x1, y1, x2, y2 = b.xyxy[0].tolist()
+            cx, cy = (x1 + x2) / 2.0, (y1 + y2) / 2.0
+
+            key = None
+            if 'cube' in raw_name or 'kubus' in raw_name or 'box' in raw_name:
+                key = 'cube'
+            elif 'sphere' in raw_name or 'bola' in raw_name or 'ball' in raw_name:
+                key = 'sphere'
+            elif 'prism' in raw_name or 'cone' in raw_name or 'prisma' in raw_name:
+                key = 'prism'
+            elif 'slot' in raw_name or 'dock' in raw_name or 'white' in raw_name:
+                key = 'slot'
+
+            if key:
+                dets[key] = (cx, cy)
+            cv2.rectangle(ann, (int(x1), int(y1)), (int(x2), int(y2)), (0, 255, 0), 2)
+            cv2.putText(ann, f"{raw_name} {conf:.2f}", (int(x1), max(15, int(y1) - 6)),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 0), 2)
+
+        self.arm_dets = dets
+        cv2.circle(ann, (w // 2, h // 2), 5, (0, 0, 255), -1)
+        cv2.putText(ann, f"PHASE: {self.mission_phase} | GRABBED: {len(self.grabbed_items)}/3",
+                    (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.50, (0, 255, 255), 2)
+        cv2.imshow('ARM_CAM', ann)
+        cv2.waitKey(1)
+
+    def move_arm_smooth(self, yaw=None, slide=None, lift=None, settle_s=0.4):
+        target_yaw = self.arm_yaw if yaw is None else max(-3.14, min(3.14, yaw))
+        target_slide = self.arm_slide if slide is None else max(0.0, min(7.0, slide))
+        target_lift = self.arm_lift if lift is None else max(-1.00, min(0.0, lift))
+
+        steps = max(
+            1,
+            int(abs(target_yaw - self.arm_yaw) / 0.035),
+            int(abs(target_slide - self.arm_slide) / 0.10),
+            int(abs(target_lift - self.arm_lift) / 0.06),
+        )
+
+        start_yaw, start_slide, start_lift = self.arm_yaw, self.arm_slide, self.arm_lift
+        for i in range(1, steps + 1):
+            alpha = i / float(steps)
+            self.arm_yaw = start_yaw + (target_yaw - start_yaw) * alpha
+            self.arm_slide = start_slide + (target_slide - start_slide) * alpha
+            self.arm_lift = start_lift + (target_lift - start_lift) * alpha
+            self.arm.cmd(yaw=self.arm_yaw, slide=self.arm_slide, lift=self.arm_lift)
+            time.sleep(0.05)
+
+        if settle_s > 0:
+            time.sleep(settle_s)
+
+    def pickup_routine(self):
+        wait_pose(self.arm, "wamv", t=15)
+        wait_pose(self.arm, "gripper", t=15)
+        self.get_logger().info("=== MEMULAI PICKUP ULTRA-HALUS ===")
+
+        grab_offsets = {
+            'cube':   (-0.30, 0.0, -0.35),
+            'sphere': ( 0.00, 0.0, -0.35),
+            'prism':  ( 0.30, 0.0, -0.35),
+        }
+
+        pickup_plan = [
+            ('sphere', [(1.57, 2.8), (1.57, 3.4), (1.57, 4.0)]),
+            ('cube',   [(3.14, 3.8), (3.14, 4.5), (3.14, 5.1)]),
+            ('prism',  [(-1.57, 2.8), (-1.57, 3.4), (-1.57, 4.0)]),
+        ]
+
+        for item, search_poses in pickup_plan:
+            self.get_logger().info(f"[PICKUP] Mencari {item}...")
+            found = False
+            for sy, ss in search_poses:
+                self.move_arm_smooth(slide=0.9, lift=0.0, settle_s=0.2)
+                self.move_arm_smooth(yaw=sy, lift=0.0, settle_s=0.3)
+                self.move_arm_smooth(slide=ss, lift=0.0, settle_s=0.5)
+                if item in self.arm_dets:
+                    found = True
+                    break
+
+            if found:
+                t_start = time.time()
+                while time.time() - t_start < 10.0:
+                    det = self.arm_dets.get(item)
+                    if det is None:
+                        time.sleep(0.1)
+                        continue
+                    w, h = self.arm_frame_size
+                    err_x = (w / 2.0) - det[0]
+                    err_y = (h / 2.0) - det[1]
+
+                    if abs(err_x) < 15.0 and abs(err_y) < 15.0:
+                        break
+
+                    dyaw = max(-0.04, min(0.04, err_x * 0.0010))
+                    dslide = max(-0.08, min(0.08, err_y * 0.0020))
+                    self.move_arm_smooth(yaw=self.arm_yaw + dyaw, slide=self.arm_slide + dslide, settle_s=0.06)
+
+            grabbed = False
+            for target_lift in [-0.35, -0.55, -0.75, -0.95]:
+                self.move_arm_smooth(lift=target_lift, settle_s=0.35)
+                if self.arm.grab(item, offset=grab_offsets[item]):
+                    grabbed = True
+                    self.grabbed_items.append(item)
+                    self.get_logger().info(f"[PICKUP] BERHASIL GRAB {item} di lift={target_lift}!")
+                    break
+
+            if not grabbed:
+                self.get_logger().error(f"[PICKUP] Gagal grab {item}.")
+
+            self.move_arm_smooth(lift=0.0, settle_s=0.35)
+            self.move_arm_smooth(slide=0.9, lift=0.0, settle_s=0.3)
+
+        self.move_arm_smooth(yaw=0.0, slide=0.9, lift=0.0, settle_s=0.6)
+
+        if len(self.grabbed_items) == 0:
+            self.get_logger().error("=== TIDAK ADA BARANG TERANGKUT! KAPAL DITAHAN DI SPOT 1 ===")
+            return
+
+        self.t0 = self.now()
+        self.mission_phase = 'NAVIGATE'
+        self.get_logger().info(f"=== {len(self.grabbed_items)} BARANG SIAP ({self.grabbed_items}) -> BERANGKAT KE SPOT 2 ===")
+
+    def drop_routine(self):
+        self.get_logger().info("=== MEMULAI FASE DROP DI KOTAK PUTIH SPOT 2 ===")
+        self.move_arm_smooth(yaw=0.0, slide=3.1, lift=0.0, settle_s=0.6)
+        self.move_arm_smooth(lift=-0.50, settle_s=0.5)
+
+        t_start = time.time()
+        while time.time() - t_start < 5.0:
+            det = self.arm_dets.get('slot')
+            if det is None:
+                break
+            w, h = self.arm_frame_size
+            err_x = (w / 2.0) - det[0]
+            err_y = (h / 2.0) - det[1]
+            if abs(err_x) < 18.0 and abs(err_y) < 18.0:
+                break
+            self.move_arm_smooth(
+                yaw=self.arm_yaw + max(-0.04, min(0.04, err_x * 0.001)),
+                slide=self.arm_slide + max(-0.08, min(0.08, err_y * 0.002)),
+                settle_s=0.06
+            )
+
+        drop_yaw_offsets = {
+            'cube':   -0.10,
+            'sphere':  0.00,
+            'prism':  +0.10,
+        }
+        base_yaw = self.arm_yaw
+        for item in self.grabbed_items:
+            self.move_arm_smooth(yaw=base_yaw + drop_yaw_offsets.get(item, 0.0), settle_s=0.4)
+            self.arm.detach(item)
+            self.get_logger().info(f"[DROP] Detach {item} tepat di kotak putih Spot 2")
+            time.sleep(0.4)
+
+        self.move_arm_smooth(lift=0.0, settle_s=0.4)
+        self.move_arm_smooth(yaw=0.0, slide=0.9, lift=0.0, settle_s=0.6)
+        self.mission_phase = 'DONE'
+        self.get_logger().info("=== MISI SELESAI 100% ===")
+
+    # ===================== NAVIGASI BERMUATAN & PARKIR SPOT 2 =====================
     def cam_cb(self, msg):
         frame = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
         h, w, _ = frame.shape
@@ -170,10 +363,13 @@ class ASV(Node):
             self.show(ann, "HALTED", col=(0, 0, 255))
             return
 
+        if self.mission_phase == 'PICKUP':
+            self.set_thrust(0.0, 0.0)
+            self.show(ann, f"PICKUP ({len(self.grabbed_items)}/3)", col=(255, 255, 0))
+            return
+
         res = self.model(frame, conf=0.30, verbose=False)[0]
 
-        # Setiap deteksi disimpan sebagai: (angle_rad, y2_norm, area_norm, label)
-        # angle_rad: NEGATIF = KIRI kapal, POSITIF = KANAN kapal
         greens = []
         reds = []
         obsts = []
@@ -198,7 +394,6 @@ class ASV(Node):
             y2_n = y2 / float(h)
             sig.append((name, cx, y2))
 
-            # Sudut horizontal relatif terhadap sumbu tengah kapal (+ kanan, - kiri)
             ang = math.atan2(cx - w / 2.0, F) + self.cam_offset
 
             col = next((k for k in cols if k in name), None)
@@ -214,7 +409,7 @@ class ASV(Node):
                     dock_a, dock_x = area, cx
                 continue
 
-            if area_n < 0.00025:
+            if area_n < 0.00020:
                 continue
 
             if col == 'green':
@@ -229,7 +424,6 @@ class ASV(Node):
             self.show(ann, "HALTED", col=(0, 0, 255))
             return
 
-       # Kunci agar parkir HANYA aktif setelah semua buoy/obstacle benar-benar lewat > 1.0 detik
         if greens or reds or obsts:
             self._saw_buoy = True
             self._clear_t = None
@@ -242,19 +436,23 @@ class ASV(Node):
 
         # ================= 1. FASE PARKIR / REM DI SPOT 2 =================
         if self.docked:
-            # Tahan lurus di tengah ceruk U melawan arus ringan
+            if not self.drop_started:
+                self.drop_started = True
+                self.mission_phase = 'DROP'
+                threading.Thread(target=self.drop_routine, daemon=True).start()
+
             if banner_x is not None:
                 err_x = (w / 2.0 + DOCK_PX_OFFSET) - banner_x
-                turn = 0.0 if abs(err_x) < 8.0 else max(-25.0, min(25.0, 0.25 * err_x))
-                err_dist = 0.034 - b_ratio
-                hold_fwd = 0.0 if abs(err_dist) < 0.002 else max(-35.0, min(25.0, err_dist * 1500.0))
+                turn = 0.0 if abs(err_x) < 10.0 else max(-18.0, min(18.0, 0.15 * err_x))
+                err_dist = 0.024 - b_ratio
+                hold_fwd = 0.0 if abs(err_dist) < 0.002 else max(-30.0, min(20.0, err_dist * 1200.0))
                 self.set_thrust(hold_fwd - turn, hold_fwd + turn)
             else:
                 self.set_thrust(0.0, 0.0)
-            self.show(ann, f"DOCKED AT SPOT 2 (b={b_ratio:.4f})", col=(0, 255, 0))
+            self.show(ann, f"DOCKED ({self.mission_phase}) b={b_ratio:.4f}", col=(0, 255, 0))
             return
 
-        if self.brake > 0 or (not greens and not reds and not obsts and (b_ratio > 0.036 or d_ratio > 0.16)):
+        if self.brake > 0 or (ready_to_dock and not greens and not reds and not obsts and (b_ratio > 0.024 or d_ratio > 0.11)):
             if self.brake < 16:
                 self.set_thrust(-140.0, -140.0)
                 self.brake += 1
@@ -264,26 +462,26 @@ class ASV(Node):
             self.show(ann, f"BRAKING {self.brake}/16 (b={b_ratio:.4f})", col=(0, 0, 255))
             return
 
-        # ================= 2. FASE MENUJU BANNER/SLOT (JIKA SUDAH DI UJUNG) =================
-        if not greens and not reds and not obsts and (banner_x is not None or dock_x is not None):
-            aim_px = banner_x if banner_x is not None else dock_x
-            err = (w / 2.0 + DOCK_PX_OFFSET) - aim_px
-            turn = max(-55.0, min(55.0, 0.35 * err))
-            fwd = max(24.0, 42.0 * (1.0 - min(0.55, b_ratio / 0.036)))
-            if abs(err) > 40.0:
-                fwd = 22.0
-            self.set_thrust(fwd - turn, fwd + turn)
-            self.show(ann, f"DOCKING APPROACH (b={b_ratio:.4f})", col=(255, 200, 0))
+        # ================= 2. FASE MASUK CERUK U SPOT 2 (LURUS HALUS) =================
+        if ready_to_dock and not greens and not reds and not obsts:
+            if banner_x is not None:
+                err = (w / 2.0 + DOCK_PX_OFFSET) - banner_x
+                turn = max(-22.0, min(22.0, 0.14 * err))
+                fwd = 34.0
+                self.set_thrust(fwd - turn, fwd + turn)
+                self.show(ann, f"DOCKING TO BANNER (b={b_ratio:.4f})", col=(255, 200, 0))
+            else:
+                self.set_thrust(32.0, 32.0)
+                self.show(ann, "DOCKING STRAIGHT IN", col=(255, 200, 0))
             return
+
         # ================= 3. KORIDOR NAVIGASI (GREEN KIRI, RED KANAN) =================
-        # Pilih buoy terdekat (y2_n paling besar = paling bawah di layar = paling dekat kapal)
         near_g = max(greens, key=lambda item: item[1]) if greens else None
         near_r = max(reds, key=lambda item: item[1]) if reds else None
 
-        left_bound = (near_g[0] + BUOY_MARGIN_RAD) if near_g else -0.42
-        right_bound = (near_r[0] - BUOY_MARGIN_RAD) if near_r else +0.42
+        left_bound = (near_g[0] + BUOY_MARGIN_RAD) if near_g else -0.45
+        right_bound = (near_r[0] - BUOY_MARGIN_RAD) if near_r else +0.45
 
-        # Pastikan batas kiri tidak menyilang batas kanan
         if left_bound > right_bound:
             mid_b = (left_bound + right_bound) / 2.0
             left_bound = mid_b - 0.05
@@ -291,8 +489,7 @@ class ASV(Node):
 
         corridor_mid = (left_bound + right_bound) / 2.0
 
-        # ================= 4. PENGHINDARAN OBSTACLE (KUNING & HITAM) =================
-        # Ambil obstacle terdekat yang berada dalam zona aktif (belum lewat di bawah lambung)
+        # ================= 4. PENGHINDARAN OBSTACLE DINI (KUNING & HITAM) =================
         active_obs = [o for o in obsts if OBS_ACTIVE_Y <= o[1] <= OBS_PASS_Y]
         cur_obs = max(active_obs, key=lambda item: item[1]) if active_obs else None
 
@@ -303,61 +500,58 @@ class ASV(Node):
             self.obs_lost_frames = 0
             obs_ang, obs_y, _, obs_col = cur_obs
 
-            # Tentukan sisi lewat sekali saja saat obstacle mulai didekati:
-            # Cek sisi mana yang punya celah sudut lebih lebar di dalam koridor (Green..Red)
             if self.locked_avoid_dir is None:
-                space_right = right_bound - obs_ang
-                space_left = obs_ang - left_bound
-                self.locked_avoid_dir = 'R' if space_right >= space_left else 'L'
+                if near_r is None and near_g is not None:
+                    self.locked_avoid_dir = 'L'
+                elif near_g is None and near_r is not None:
+                    self.locked_avoid_dir = 'R'
+                else:
+                    space_right = right_bound - obs_ang
+                    space_left = obs_ang - left_bound
+                    self.locked_avoid_dir = 'R' if space_right >= space_left else 'L'
 
             if self.locked_avoid_dir == 'R':
-                # Lewat KANAN obstacle (di antara obstacle dan Red buoy)
                 safe_left = obs_ang + OBS_MARGIN_RAD
                 target_ang = max(safe_left, (safe_left + right_bound) / 2.0)
-                target_ang = min(target_ang, right_bound + 0.08)
+                target_ang = min(target_ang, right_bound + 0.10)
                 mode = f"AVOID {obs_col.upper()} -> RIGHT"
             else:
-                # Lewat KIRI obstacle (di antara Green buoy dan obstacle)
                 safe_right = obs_ang - OBS_MARGIN_RAD
                 target_ang = min(safe_right, (left_bound + safe_right) / 2.0)
-                target_ang = max(target_ang, left_bound - 0.08)
+                target_ang = max(target_ang, left_bound - 0.10)
                 mode = f"AVOID {obs_col.upper()} -> LEFT"
         else:
-            # Reset kunci arah setelah obstacle benar-benar hilang beberapa frame
             if self.locked_avoid_dir is not None:
                 self.obs_lost_frames += 1
-                if self.obs_lost_frames >= 5:
+                if self.obs_lost_frames >= 6:
                     self.locked_avoid_dir = None
                     self.obs_lost_frames = 0
 
-        # ================= 5. KENDALI BLIND SESUAT / HALUS =================
+        # ================= 5. KENDALI BLIND SESAAT / HALUS =================
         if greens or reds or obsts:
             self.last_seen_t = now
             self.last_target_ang = target_ang
         elif now - self.last_seen_t < 1.5:
-            # Pertahankan arah terakhir secara lembut jika kedip < 1.5 detik
             target_ang = self.last_target_ang * 0.7
             mode = "HOLD LAST"
         else:
             target_ang = 0.0
             mode = "SEARCH STRAIGHT"
 
-        # Gambar garis vertikal target sudut di layar OpenCV untuk visualisasi debug
         tx = int(w / 2.0 + F * math.tan(target_ang - self.cam_offset))
         tx = max(0, min(w - 1, tx))
         cv2.line(ann, (tx, int(h * 0.4)), (tx, h), (255, 255, 0), 3)
         cv2.line(ann, (int(w / 2), int(h * 0.7)), (int(w / 2), h), (200, 200, 200), 1)
 
-        # ================= 6. MIXING THRUSTER KIRI & KANAN =================
-        # target_ang > 0 artinya target di KANAN -> thruster KIRI harus lebih besar dari KANAN
+        # ================= 6. MIXING THRUSTER KIRI & KANAN (ADAPTIF BEBAN) =================
         turn = KP_STEER * target_ang
         turn = max(-MAX_TURN, min(MAX_TURN, turn))
 
-        # Pelankan laju maju secara proporsional saat sudut belok besar
-        speed_factor = 1.0 - min(0.45, abs(target_ang) / 0.65)
+        speed_factor = 1.0 - min(0.65, abs(target_ang) / 0.50)
         fwd = MIN_SPEED + (BASE_SPEED - MIN_SPEED) * speed_factor
-        if cur_obs is not None and cur_obs[1] > 0.60:
-            fwd = min(fwd, 45.0)
+        if cur_obs is not None:
+            # Melambat otomatis saat menghindar obstacle agar tidak nyenggol buoy
+            fwd = min(fwd, 32.0 if cur_obs[1] > 0.45 else 40.0)
 
         self.set_thrust(fwd + turn, fwd - turn)
 

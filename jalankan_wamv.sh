@@ -23,5 +23,14 @@ play
 ros2 launch vrx_gz spawn.launch.py world:=pengiriman_kapal_otonom name:=wamv model:=wam-v x:=-48.5 y:=0 z:=0.3 Y:=0.0 &
 LAUNCH=$!
 sleep 20
+
+# 1. Pasang lengan otomatis ke WAM-V (menunggu kapal stabil 4 detik lalu spawn asv_arm)
+python3 "$HERE/lengan.py" pasang
+
+# 2. Jalankan bridge kamera lengan (/arm/camera/image) ke ROS 2 di background
+ros2 run ros_gz_bridge parameter_bridge /arm/camera/image@sensor_msgs/msg/Image@gz.msgs.Image &
+BRIDGE=$!
+
+wait $GZ
 play
 wait $GZ
