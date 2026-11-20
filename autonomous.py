@@ -1,577 +1,720 @@
 #!/usr/bin/env python3
+"""Misi otonom penuh ASV Transporter (Final Project NALA 16) di VRX / Gazebo, world skala x5.
+
+  INIT -> PICKUP (Spot 1, tahan posisi di slot) -> FTP (gate hijau-merah + hindari rintangan)
+       -> DOCKING (slot Spot 2) -> UNLOAD (taruh 3 barang di zona putih)
+       -> BUZZER + WATER CANNON (tepat saat barang terakhir dilepas) -> DONE
+
+Kill switch: publish std_msgs/Bool true ke /asv/kill -> semua thruster 0 dan lengan berhenti di tempat
+(misi lanjut saat false). Status misi di /asv/state (std_msgs/String, JSON) untuk dashboard web.
+
+Jalankan (setelah ./jalankan_wamv.sh selesai memasang lengan):
+    python3 autonomous.py                           # misi penuh
+    python3 autonomous.py --ros-args -p gui:=false  # tanpa jendela OpenCV
+    python3 autonomous.py --ros-args -p skip_pickup:=true   # uji FTP + docking saja
+Uji logika tanpa Gazebo:  python3 tests/sim_ftp_offline.py
+"""
+import json
 import math
+import os
 import sys
-import time
 import threading
+import time
+import traceback
 from collections import deque
+
 import cv2
 import numpy as np
 import rclpy
-from rclpy.node import Node
-from sensor_msgs.msg import Image, CameraInfo
-from std_msgs.msg import Float64
 from cv_bridge import CvBridge
-from ultralytics import YOLO
+from rclpy.executors import MultiThreadedExecutor
+from rclpy.node import Node
+from sensor_msgs.msg import CameraInfo, Image
+from std_msgs.msg import Bool, Float64, String
 
-sys.path.insert(0, '/home/alpro/fp3d_ws/src/arena-vrx')
-from lengan import Arm, wait_pose
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)
 
-# ===================== KONFIGURASI UTAMA (TUNED FOR LOADED CARGO) =====================
-MODEL_PATH = '/home/alpro/fp3d_ws/src/arena-vrx/dataset/model/frontnav.pt'
-ARM_MODEL_PATH = '/home/alpro/fp3d_ws/src/arena-vrx/dataset/model/arm.pt'
-HFOV = 1.047              # rad, fallback jika camera_info belum masuk
-DOCK_PX_OFFSET = 0.0      # px, lurus tepat ke tengah banner Spot 2
+import gz.msgs10.image_pb2 as gz_image  # noqa: E402
+import gz.msgs10.pose_v_pb2 as pvb  # noqa: E402
+from ultralytics import YOLO  # noqa: E402
 
-# Kecepatan & Kontrol Kemudi (lebih kalem tapi torsi belok lebih sigap karena bawa beban)
-BASE_SPEED = 48.0         # thrust maju normal (diturunkan dari 60 agar sempat belok)
-MIN_SPEED = 26.0          # thrust maju saat belok tajam / hindar obstacle
-KP_STEER = 175.0          # gain belok lebih responsif melawan inersia muatan
-MAX_TURN = 105.0          # torsi diferensial maksimum untuk belok tajam
-
-# Margin sudut aman & deteksi dini ("tau diri" bawa muatan lebar)
-BUOY_MARGIN_RAD = 0.19    # ~11 deg ruang aman dari buoy hijau/merah
-OBS_MARGIN_RAD = 0.30     # ~17 deg ruang aman dari obstacle kuning/hitam
-OBS_ACTIVE_Y = 0.25       # mulai menghindar JAUH lebih awal (sebelumnya 0.38)
-OBS_PASS_Y = 0.90         # tetap waspada sampai obstacle benar-benar melewati lambung
-
-# Deteksi stuck / nabrak
-STUCK_WIN = 2.0
-STUCK_PX = 2.5
-STUCK_GRACE = 12.0
+from asv import config as C  # noqa: E402
+from asv.arm_ctrl import ArmController, ArmIK  # noqa: E402
+from asv.aux_effects import AuxEffects  # noqa: E402
+from asv.control import BoatState, LOSGuidance, Pilot, StationKeeper, StationKeeper3DOF  # noqa: E402
+from asv.geometry import CourseFrame, boat_to_world, world_to_boat, yaw_of  # noqa: E402
+from asv.perception import ArmPerception, FrontPerception, OverviewLocator  # noqa: E402
+from asv.planner import LandmarkMap, plan_path  # noqa: E402
+from lengan import Arm, wait_pose  # noqa: E402
 
 
-class ASV(Node):
+class PoseSource:
+    """Pose semua entitas dari gz dynamic_pose/info, plus riwayat ber-timestamp untuk WAM-V
+    (supaya deteksi kamera dipasangkan dengan pose kapal pada saat gambar diambil)."""
+
+    def __init__(self, gz_node):
+        self.lock = threading.Lock()
+        self.p = {}
+        self.hist = deque(maxlen=400)
+        self.stamp = 0.0
+        gz_node.subscribe(pvb.Pose_V, f"/world/{C.WORLD}/dynamic_pose/info", self._cb)
+
+    def _cb(self, m):
+        t = m.header.stamp.sec + m.header.stamp.nsec * 1e-9
+        with self.lock:
+            for q in m.pose:
+                self.p[q.name] = (q.position.x, q.position.y, q.position.z,
+                                  q.orientation.x, q.orientation.y, q.orientation.z, q.orientation.w)
+                if q.name == "wamv":
+                    self.hist.append((t, self.p["wamv"]))
+            self.stamp = t
+
+    def get(self, name):
+        with self.lock:
+            return self.p.get(name)
+
+    def roll_pitch(self):
+        """(roll, pitch) kapal dalam derajat."""
+        w = self.get("wamv")
+        if w is None:
+            return (0.0, 0.0)
+        qx, qy, qz, qw = w[3:7]
+        roll = math.atan2(2 * (qw * qx + qy * qz), 1 - 2 * (qx * qx + qy * qy))
+        pitch = math.asin(max(-1.0, min(1.0, 2 * (qw * qy - qz * qx))))
+        return math.degrees(roll), math.degrees(pitch)
+
+    def wamv_at(self, t):
+        with self.lock:
+            if not self.hist:
+                return None
+            best = min(self.hist, key=lambda h: abs(h[0] - t))
+            return best[1] if abs(best[0] - t) < 0.5 else self.hist[-1][1]
+
+
+class ASVMission(Node):
     def __init__(self):
-        super().__init__('asv_vision_only')
-        self.bridge = CvBridge()
-        self.model = YOLO(MODEL_PATH)
-        self.arm_model = YOLO(ARM_MODEL_PATH)
-        self.get_logger().info(f"Front Classes: {self.model.names}")
-        self.get_logger().info(f"Arm Classes: {self.arm_model.names}")
+        super().__init__("asv_mission")
+        self.declare_parameter("gui", True)
+        self.declare_parameter("skip_pickup", False)
+        self.declare_parameter("gt_fallback", C.ALLOW_GT_FALLBACK)
+        self.declare_parameter("azimuth_hold", C.AZIMUTH_HOLD)
+        self.gui = bool(self.get_parameter("gui").value)
+        self.skip_pickup = bool(self.get_parameter("skip_pickup").value)
+        self.gt_fallback = bool(self.get_parameter("gt_fallback").value)
+        self.log = self.get_logger()
 
-        self.declare_parameter('camera_topic',
-                               '/wamv/sensors/cameras/front_left_camera_sensor/image_raw')
-        self.declare_parameter('cam_angle_offset', -0.06)
-        self.cam_offset = float(self.get_parameter('cam_angle_offset').value)
-
-        cam_topic = self.get_parameter('camera_topic').value
-        self.create_subscription(Image, cam_topic, self.cam_cb, 10)
-        self.create_subscription(CameraInfo, cam_topic.replace('image_raw', 'camera_info'),
-                                 self.info_cb, 10)
-        self.create_subscription(Image, '/arm/camera/image', self.arm_cam_cb, 1)
-
-        self.pub_l = self.create_publisher(Float64, '/wamv/thrusters/left/thrust', 10)
-        self.pub_r = self.create_publisher(Float64, '/wamv/thrusters/right/thrust', 10)
-
-        self.fx = None
-        self.last_cmd = (0.0, 0.0)
-        self.t0 = self.now()
-        self.last_log = 0.0
-        self.ring = deque(maxlen=24)
-
-        self.halted = False
-        self.docked = False
-        self.brake = 0
-
-        # Memori arah hindar obstacle
-        self.locked_avoid_dir = None
-        self.obs_lost_frames = 0
-
-        # Memori dinding terakhir
-        self.last_seen_t = self.now()
-        self.last_target_ang = 0.0
-
-        # Stuck detector
-        self.sig_ref = None
-        self.sig_t = 0.0
-        self.motion = 0.0
-        self.still = 0
-
-        # State lengan & misi: 'PICKUP' -> 'NAVIGATE' -> 'DROP' -> 'DONE'
+        # ---------------- Gazebo (gz transport) lewat kelas Arm bawaan arena
         self.arm = Arm()
-        self.arm_dets = {}
-        self.arm_frame_size = (640, 480)
-        self.arm_yaw = 0.0
-        self.arm_slide = 0.9
-        self.arm_lift = 0.0
-        self.mission_phase = 'PICKUP'
-        self.drop_started = False
-        self.grabbed_items = []
+        self.poses = PoseSource(self.arm.n)
+        self.overview = OverviewLocator(self.log)
+        self.arm.n.subscribe(gz_image.Image, C.OVERVIEW_GZ_TOPIC, self._overview_cb)
+        self.aux = AuxEffects(self.arm.n, self.log)
 
-        threading.Thread(target=self.pickup_routine, daemon=True).start()
-        self.get_logger().info("=== asv_vision_only LOADED-TUNED MISSION STARTED ===")
+        # ---------------- persepsi
+        self.bridge = CvBridge()
+        self.lmap = LandmarkMap()
+        self.map_lock = threading.Lock()
+        self.front = FrontPerception(YOLO(C.FRONT_MODEL), self.lmap, self.log)
+        self.armvis = ArmPerception(YOLO(C.ARM_MODEL), self.log)
+        self.log.info(f"frontnav: {self.front.model.names} | arm: {self.armvis.model.names}")
+        self.front_frame = None
+        self.front_lock = threading.Lock()
+        self.front_active = False
 
-    # ------------------------------------------------------------------
-    def now(self):
-        return self.get_clock().now().nanoseconds * 1e-9
+        self.create_subscription(Image, C.FRONT_CAM_TOPIC, self._front_cb, 2)
+        self.create_subscription(CameraInfo, C.FRONT_CAM_TOPIC.replace("image_raw", "camera_info"),
+                                 self._front_info_cb, 2)
+        self.create_subscription(Image, C.ARM_CAM_TOPIC, self._arm_cb, 2)
+        self.create_subscription(Bool, "/asv/kill", self._kill_cb, 10)
 
-    def info_cb(self, m):
-        if self.fx is None and m.k[0] > 1.0:
-            self.fx = float(m.k[0])
-            self.get_logger().info(f"CameraInfo fx={self.fx:.1f} ({m.width}x{m.height})")
+        self.pub_l = self.create_publisher(Float64, C.THRUST_L, 10)
+        self.pub_r = self.create_publisher(Float64, C.THRUST_R, 10)
+        self.pub_lpos = self.create_publisher(Float64, C.THRUST_L_POS, 10)
+        self.pub_rpos = self.create_publisher(Float64, C.THRUST_R_POS, 10)
+        self.pub_state = self.create_publisher(String, "/asv/state", 10)
+        self.pub_buzzer = self.create_publisher(Bool, "/asv/buzzer", 10)
+        self.pub_cannon = self.create_publisher(Bool, "/asv/water_cannon", 10)
 
-    def set_thrust(self, l, r):
-        a, b = Float64(), Float64()
-        a.data = float(max(-200.0, min(250.0, l)))
-        b.data = float(max(-200.0, min(250.0, r)))
-        self.pub_l.publish(a)
-        self.pub_r.publish(b)
-        self.last_cmd = (a.data, b.data)
+        # ---------------- kendali
+        self.killed = False
+        self.phase = "INIT"
+        self.mode = "idle"            # idle | hold | path
+        self.st = BoatState()
+        self.pilot = Pilot()
+        self.keeper = StationKeeper()
+        self.keeper3 = StationKeeper3DOF()
+        self.azimuth_hold = bool(self.get_parameter("azimuth_hold").value)
+        self.los = LOSGuidance()
+        self.path_lock = threading.Lock()
+        self.u_ref = 0.0
+        self.cmd = (0.0, 0.0)
+        self.nav_info = {}
+        self.frame = None             # CourseFrame (ditetapkan dari pose start)
+        self.loaded = []              # barang di kompartemen kapal
+        self.placed = []
+        self.pick_boat_xy = {}        # posisi barang (kerangka kapal) saat diambil di Spot 1
+        self.gates_log = {}
+        self.events = []
 
-    def halt(self):
-        self.halted = True
-        self.set_thrust(0.0, 0.0)
-        lines = list(self.ring)[-12:]
-        for ln in ["########## HALTED: NABRAK / NYANGKUT ##########"] + lines:
-            self.get_logger().info(ln)
+        self.armc = ArmController(self.arm, self.armvis, self.poses, self.log, self._arm_must_wait)
 
-    def check_stuck(self, sig, now):
-        if self.sig_ref is not None and now - self.sig_t < STUCK_WIN:
+        self.create_timer(0.05, self._control_tick)
+        self.create_timer(0.5, self._publish_state)
+        if self.gui:
+            # SEMUA panggilan cv2 GUI dari SATU thread (HighGUI/Qt tidak thread-safe; timer di
+            # MultiThreadedExecutor berpindah-pindah thread -> jendela "Not Responding")
+            threading.Thread(target=self._gui_loop, daemon=True).start()
+        threading.Thread(target=self._front_worker, daemon=True).start()
+        threading.Thread(target=self._mission, daemon=True).start()
+        self.log.info("=== ASV MISSION NODE SIAP ===")
+
+    # ================================================================== callbacks sensor
+    def _overview_cb(self, m):
+        if m.width == 0:
             return
-        if self.sig_ref is not None:
-            ds = []
-            for n, cx, y2 in self.sig_ref:
-                best = None
-                for n2, cx2, y22 in sig:
-                    if n2 == n:
-                        d = math.hypot(cx2 - cx, y22 - y2)
-                        if d < 60 and (best is None or d < best):
-                            best = d
-                if best is not None:
-                    ds.append(best)
-            if len(ds) >= 2:
-                self.motion = sum(ds) / len(ds)
-                cmd = (self.last_cmd[0] + self.last_cmd[1]) / 2.0
-                if (cmd > 35 and now - self.t0 > STUCK_GRACE and self.motion < STUCK_PX
-                        and not self.docked and self.brake == 0):
-                    self.still += 1
-                else:
-                    self.still = 0
-                if self.still >= 2:
-                    self.halt()
+        img = np.frombuffer(m.data, np.uint8)
+        try:
+            img = img.reshape(m.height, m.width, -1)[:, :, :3]
+        except ValueError:
+            return
+        self.overview.set_frame(img)
+
+    def _front_info_cb(self, m):
+        if m.k[0] > 1.0:
+            self.front.set_intrinsics(m.width, m.height, float(m.k[0]))
+
+    def _front_cb(self, msg):
+        t = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
+        with self.front_lock:
+            self.front_frame = (t, msg)
+
+    def _arm_cb(self, msg):
+        ap = self.poses.get("asv_arm") or self.poses.get("wamv")
+        g = self.poses.get("gripper")
+        if ap is None or g is None:
+            return
+        frame = self.bridge.imgmsg_to_cv2(msg, desired_encoding="bgr8")
+        self.armvis.set_frame(frame, self.armvis.cam_pose(ap, g))
+
+    def _kill_cb(self, msg):
+        if bool(msg.data) != self.killed:
+            self.killed = bool(msg.data)
+            self.log.warn(f"########## KILL SWITCH {'AKTIF' if self.killed else 'DILEPAS'} ##########")
+            if self.killed:
+                self._thrust(0.0, 0.0)
+
+    def _front_worker(self):
+        """Thread YOLO kamera depan: selalu memproses frame TERBARU (frame lama dibuang)."""
+        last_t = -1.0
+        while rclpy.ok():
+            if not self.front_active:
+                time.sleep(0.1)
+                continue
+            with self.front_lock:
+                fr = self.front_frame
+            if fr is None or fr[0] == last_t:
+                time.sleep(0.01)
+                continue
+            last_t, msg = fr
+            pose = self.poses.wamv_at(last_t)
+            if pose is None:
+                continue
+            try:
+                img = self.bridge.imgmsg_to_cv2(msg, desired_encoding="bgr8")
+                with self.map_lock:
+                    self.front.process(img, pose, last_t)
+            except Exception as e:  # noqa: BLE001
+                self.log.error(f"[FRONT] {e!r}")
+
+    # ================================================================== kendali (20 Hz)
+    def _thrust(self, left, right, az_l=0.0, az_r=0.0):
+        self.cmd = (left, right)
+        self.pub_l.publish(Float64(data=float(left)))
+        self.pub_r.publish(Float64(data=float(right)))
+        self.pub_lpos.publish(Float64(data=float(az_l)))
+        self.pub_rpos.publish(Float64(data=float(az_r)))
+
+    def _arm_must_wait(self):
+        """Lengan dijeda saat kill switch aktif atau kapal miring berlebihan."""
+        if self.killed:
+            return True
+        roll, pitch = self.poses.roll_pitch()
+        if max(abs(roll), abs(pitch)) > C.ROLL_PITCH_LIMIT:
+            now = time.time()
+            if now - getattr(self, "_tilt_log_t", 0.0) > 2.0:
+                self._tilt_log_t = now
+                self.log.warn(f"[ARM] kapal miring roll {roll:+.1f} pitch {pitch:+.1f} deg -> lengan dijeda")
+            return True
+        return False
+
+    def _control_tick(self):
+        w = self.poses.get("wamv")
+        if w is None:
+            return
+        t = self.poses.stamp
+        self.st.update(t, w[0], w[1], yaw_of(w))
+        if self.killed:
+            self._thrust(0.0, 0.0)
+            self.pilot.reset()
+            return
+        if self.mode == "hold" and self.keeper.ref is not None:
+            if self.azimuth_hold:
+                ((tl, al), (tr, ar)), (ex, ey, e_psi) = self.keeper3.command(self.st, t)
+                self.nav_info = dict(e_f=round(ex, 2), e_lat=round(ey, 2), e_psi_deg=round(math.degrees(e_psi), 1))
+                self._thrust(tl, tr, al, ar)
             else:
-                self.still = 0
-        self.sig_ref, self.sig_t = list(sig), now
+                (left, right), e_f, e_psi = self.keeper.command(self.st)
+                self.nav_info = dict(e_f=round(e_f, 2), e_psi_deg=round(math.degrees(e_psi), 1))
+                self._thrust(left, right)
+        elif self.mode == "path":
+            with self.path_lock:
+                psi_d, e, rem, reached = self.los.step(w[0], w[1])
+                u_d = self.los.speed_for(self.u_ref)
+            if psi_d is None:
+                psi_d = self.frame.heading
+            s_now = self.frame.to_sl(w)[0]
+            if s_now < C.SLOT_EXIT:
+                u_d = min(u_d, C.U_EXIT)
+            if rem < C.DOCK_SLOW_DIST:
+                u_d = min(u_d, max(C.U_DOCK_MIN, self.u_ref * rem / C.DOCK_SLOW_DIST))
+            (left, right), e_psi = self.pilot.command(self.st, psi_d, u_d, t)
+            self.nav_info = dict(xte=round(e, 2), rem=round(rem, 1), u=round(self.st.u, 2), u_d=round(u_d, 2),
+                                 e_psi_deg=round(math.degrees(e_psi), 1))
+            self.nav_info["rem_raw"] = rem
+            self._thrust(left, right)
+        else:
+            self._thrust(0.0, 0.0)
 
-    def refine_class(self, frame, x1, y1, x2, y2, name):
-        if 'red' not in name:
-            return name
-        bw, bh = x2 - x1, y2 - y1
-        roi = frame[int(y1 + 0.3 * bh):int(y2 - 0.3 * bh), int(x1 + 0.3 * bw):int(x2 - 0.3 * bw)]
-        if roi.size == 0:
-            return name
-        hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
-        if np.mean(hsv[:, :, 2]) < 115 and np.mean(hsv[:, :, 1]) < 95:
-            return 'black'
-        return name
+    def _hold_here(self, heading=None):
+        w = self.poses.get("wamv")
+        self._hold_at(w[0], w[1], yaw_of(w) if heading is None else heading)
 
-    def show(self, img, text, dbg='', col=(0, 255, 255)):
-        t = self.now()
-        if t - self.last_log > 0.5:
-            self.last_log = t
-            line = (f"[t={t - self.t0:5.1f}s] {text} | {dbg} | "
-                    f"L={self.last_cmd[0]:.0f} R={self.last_cmd[1]:.0f}")
-            self.ring.append(line)
-            if not self.halted:
-                self.get_logger().info(line)
-        cv2.putText(img, text, (10, 26), cv2.FONT_HERSHEY_SIMPLEX, 0.55, col, 2)
-        cv2.imshow('ASV', img)
-        cv2.waitKey(1)
+    def _hold_at(self, x, y, psi):
+        self.keeper.set(x, y, psi)
+        self.keeper3.set(x, y, psi)
+        self.mode = "hold"
 
-    # ===================== KONTROL LENGAN ULTRA-HALUS (SUDAH WORK!) =====================
-    def arm_cam_cb(self, msg):
-        frame = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
-        h, w, _ = frame.shape
-        self.arm_frame_size = (w, h)
-        ann = frame.copy()
+    # ================================================================== status & GUI
+    def _publish_state(self):
+        try:
+            self._publish_state_impl()
+        except Exception as e:  # noqa: BLE001  (status tidak boleh menjatuhkan executor/kendali)
+            self.log.error(f"[STATE] {e!r}")
 
-        res = self.arm_model(frame, conf=0.25, verbose=False)[0]
-        dets = {}
-        for b in res.boxes:
-            raw_name = self.arm_model.names[int(b.cls[0])].lower()
-            conf = float(b.conf[0])
-            x1, y1, x2, y2 = b.xyxy[0].tolist()
-            cx, cy = (x1 + x2) / 2.0, (y1 + y2) / 2.0
+    def _publish_state_impl(self):
+        w = self.poses.get("wamv")
+        d = dict(phase=self.phase, mode=self.mode, killed=self.killed, loaded=self.loaded, placed=self.placed,
+                 thrust=[round(self.cmd[0], 1), round(self.cmd[1], 1)],
+                 pose=None if w is None else [round(w[0], 2), round(w[1], 2), round(math.degrees(yaw_of(w)), 1)],
+                 nav={k: v for k, v in self.nav_info.items() if k != "rem_raw"},
+                 gates=self.gates_log, events=self.events[-5:])
+        self.pub_state.publish(String(data=json.dumps(d)))
 
-            key = None
-            if 'cube' in raw_name or 'kubus' in raw_name or 'box' in raw_name:
-                key = 'cube'
-            elif 'sphere' in raw_name or 'bola' in raw_name or 'ball' in raw_name:
-                key = 'sphere'
-            elif 'prism' in raw_name or 'cone' in raw_name or 'prisma' in raw_name:
-                key = 'prism'
-            elif 'slot' in raw_name or 'dock' in raw_name or 'white' in raw_name:
-                key = 'slot'
+    def _gui_frame(self, name):
+        """Frame untuk ditampilkan: anotasi deteksi bila masih baru (<1 s), selain itu gambar kamera live."""
+        src = self.front if name == "FRONT" else self.armvis
+        with src.lock:
+            fresh = src.last_ann is not None and time.time() - src.last_ann_t < 1.0
+            img = src.last_ann.copy() if fresh else None
+        if img is None:
+            if name == "FRONT":
+                with self.front_lock:
+                    fr = self.front_frame
+                img = None if fr is None else self.bridge.imgmsg_to_cv2(fr[1], desired_encoding="bgr8")
+            else:
+                with self.armvis.lock:
+                    img = None if self.armvis.frame is None else self.armvis.frame.copy()
+        return img
 
-            if key:
-                dets[key] = (cx, cy)
-            cv2.rectangle(ann, (int(x1), int(y1)), (int(x2), int(y2)), (0, 255, 0), 2)
-            cv2.putText(ann, f"{raw_name} {conf:.2f}", (int(x1), max(15, int(y1) - 6)),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 0), 2)
+    def _gui_loop(self):
+        for name in ("FRONT", "ARM"):
+            cv2.namedWindow(name, cv2.WINDOW_NORMAL)
+        cv2.resizeWindow("FRONT", 960, 540)
+        cv2.resizeWindow("ARM", 640, 480)
+        while rclpy.ok():
+            for name in ("FRONT", "ARM"):
+                try:
+                    img = self._gui_frame(name)
+                except Exception:  # noqa: BLE001
+                    img = None
+                if img is None:
+                    continue
+                info = f"{self.phase} | {self.mode}{' | KILLED' if self.killed else ''}"
+                if name == "FRONT":
+                    rp = self.poses.roll_pitch()
+                    info += f" | roll {rp[0]:+.1f} pitch {rp[1]:+.1f} deg"
+                cv2.putText(img, info, (10, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
+                cv2.imshow(name, img)
+            cv2.waitKey(30)          # memproses event jendela ~30 Hz
+        cv2.destroyAllWindows()
 
-        self.arm_dets = dets
-        cv2.circle(ann, (w // 2, h // 2), 5, (0, 0, 255), -1)
-        cv2.putText(ann, f"PHASE: {self.mission_phase} | GRABBED: {len(self.grabbed_items)}/3",
-                    (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.50, (0, 255, 255), 2)
-        cv2.imshow('ARM_CAM', ann)
-        cv2.waitKey(1)
+    def event(self, text):
+        self.events.append(dict(t=round(self.poses.stamp, 1), msg=text))
+        self.log.info(f"[EVENT] {text}")
 
-    def move_arm_smooth(self, yaw=None, slide=None, lift=None, settle_s=0.4):
-        target_yaw = self.arm_yaw if yaw is None else max(-3.14, min(3.14, yaw))
-        target_slide = self.arm_slide if slide is None else max(0.0, min(7.0, slide))
-        target_lift = self.arm_lift if lift is None else max(-1.00, min(0.0, lift))
+    def wait_until(self, cond, timeout, period=0.1):
+        t_end = time.time() + timeout
+        while time.time() < t_end:
+            if not self.killed and cond():
+                return True
+            time.sleep(period)
+        return False
 
-        steps = max(
-            1,
-            int(abs(target_yaw - self.arm_yaw) / 0.035),
-            int(abs(target_slide - self.arm_slide) / 0.10),
-            int(abs(target_lift - self.arm_lift) / 0.06),
-        )
+    # ================================================================== misi
+    def _mission(self):
+        try:
+            self._init()
+            if not self.skip_pickup:
+                self.phase = "PICKUP"
+                self._pickup()
+            else:
+                self.loaded = []
+            self.phase = "FTP"
+            self._ftp_and_dock()
+            self.phase = "UNLOAD"
+            self._unload()
+            self.phase = "DONE"
+            self.event("MISI SELESAI")
+        except Exception as e:  # noqa: BLE001
+            self.log.error(f"[MISSION] EXCEPTION {e!r}\n{traceback.format_exc()}")
+            self.phase = "ERROR"
+            self._hold_here()
 
-        start_yaw, start_slide, start_lift = self.arm_yaw, self.arm_slide, self.arm_lift
-        for i in range(1, steps + 1):
-            alpha = i / float(steps)
-            self.arm_yaw = start_yaw + (target_yaw - start_yaw) * alpha
-            self.arm_slide = start_slide + (target_slide - start_slide) * alpha
-            self.arm_lift = start_lift + (target_lift - start_lift) * alpha
-            self.arm.cmd(yaw=self.arm_yaw, slide=self.arm_slide, lift=self.arm_lift)
-            time.sleep(0.05)
+    def _init(self):
+        self.log.info("[INIT] menunggu pose wamv / lengan dari Gazebo ...")
+        for n in ("wamv", "gripper"):
+            wait_pose(self.arm, n, t=30)
+            if not self.wait_until(lambda: self.poses.get(n) is not None, 30):
+                raise RuntimeError(f"pose '{n}' tidak ada. Sudah ./jalankan_wamv.sh dan lengan terpasang?")
+        self.wait_until(lambda: self.poses.get("wamv") is not None and self.st.t is not None, 5)
+        w = self.poses.get("wamv")
+        self.frame = CourseFrame(w[:2], yaw_of(w))
+        self.log.info(f"[INIT] start ({w[0]:.2f}, {w[1]:.2f}) heading {math.degrees(yaw_of(w)):.1f} deg")
+        self._hold_here(self.frame.heading)
+        self.front_active = True                      # peta landmark mulai dibangun sejak di slot start
+        self.armc.sync()
+        self.armc.move(lift=0.0)
 
-        if settle_s > 0:
-            time.sleep(settle_s)
+    # ------------------------------------------------------------------ PICKUP di Spot 1
+    def _item_candidates(self):
+        """Lokasi kasar barang: kamera overview (HSV kuning) dalam jangkauan lengan."""
+        w = self.poses.get("wamv")
+        pivot = boat_to_world(w, C.ARM_PIVOT)
+        reach = C.ARM_CARR0 + C.ARM_SLIDE_MAX
+        self.wait_until(self.overview.has_frame, 5.0)
+        cands = [p for p in self.overview.items_near(pivot, reach) if ArmIK.reachable(*world_to_boat(w, p))]
+        src = "overview"
+        if not cands and self.gt_fallback:
+            self.log.warn("[PICKUP] kamera overview tidak menemukan barang -> FALLBACK pose Gazebo")
+            cands = [self.poses.get(f"item_{k}")[:2] for k in C.ITEMS if self.poses.get(f"item_{k}")]
+            src = "gazebo"
+        self.log.info(f"[PICKUP] {len(cands)} kandidat barang ({src}): "
+                      + ", ".join(f"({x:.2f},{y:.2f})" for x, y in cands))
+        # urut menurut sudut sendi yaw supaya lengan berputar satu arah
+        return sorted(cands, key=lambda p: ArmIK.boat_xy_to_joints(*world_to_boat(w, p))[0])
 
-    def pickup_routine(self):
-        wait_pose(self.arm, "wamv", t=15)
-        wait_pose(self.arm, "gripper", t=15)
-        self.get_logger().info("=== MEMULAI PICKUP ULTRA-HALUS ===")
+    def _gt_class_near(self, xy, tol=1.0):
+        best, bd = None, tol
+        for k in C.ITEMS:
+            p = self.poses.get(f"item_{k}")
+            if p and math.hypot(p[0] - xy[0], p[1] - xy[1]) < bd:
+                best, bd = k, math.hypot(p[0] - xy[0], p[1] - xy[1])
+        return best
 
-        grab_offsets = {
-            'cube':   (-0.30, 0.0, -0.35),
-            'sphere': ( 0.00, 0.0, -0.35),
-            'prism':  ( 0.30, 0.0, -0.35),
-        }
-
-        pickup_plan = [
-            ('sphere', [(1.57, 2.8), (1.57, 3.4), (1.57, 4.0)]),
-            ('cube',   [(3.14, 3.8), (3.14, 4.5), (3.14, 5.1)]),
-            ('prism',  [(-1.57, 2.8), (-1.57, 3.4), (-1.57, 4.0)]),
-        ]
-
-        for item, search_poses in pickup_plan:
-            self.get_logger().info(f"[PICKUP] Mencari {item}...")
-            found = False
-            for sy, ss in search_poses:
-                self.move_arm_smooth(slide=0.9, lift=0.0, settle_s=0.2)
-                self.move_arm_smooth(yaw=sy, lift=0.0, settle_s=0.3)
-                self.move_arm_smooth(slide=ss, lift=0.0, settle_s=0.5)
-                if item in self.arm_dets:
-                    found = True
+    def _pickup(self):
+        self.event("PICKUP mulai")
+        z_item = C.DOCK_TOP_Z + 0.7 * C.ITEM
+        for attempt in range(2):
+            for xy in self._item_candidates():
+                if len(self.loaded) == len(C.ITEMS):
                     break
-
-            if found:
-                t_start = time.time()
-                while time.time() - t_start < 10.0:
-                    det = self.arm_dets.get(item)
-                    if det is None:
-                        time.sleep(0.1)
+                if any(math.hypot(xy[0] - p[0], xy[1] - p[1]) < 0.4 for p in self._loaded_world_xy()):
+                    continue
+                ref, cls = self.armc.refine("any_item", xy, z_item)
+                if cls == "poly" or (cls in self.loaded):
+                    # YOLO ragu / kelas sudah terambil: pilih dari sisa kelas yang bukan bola
+                    rest = [k for k in ("cube", "prism") if k not in self.loaded]
+                    self.log.warn(f"[PICKUP] kelas ambigu ({cls}) di {xy}, sisa kandidat {rest}")
+                    cls = rest[0] if len(rest) == 1 else (self._gt_class_near(xy) if self.gt_fallback else None)
+                if cls is None:
+                    cls = self._gt_class_near(xy) if self.gt_fallback else None
+                    if cls is None:
                         continue
-                    w, h = self.arm_frame_size
-                    err_x = (w / 2.0) - det[0]
-                    err_y = (h / 2.0) - det[1]
-
-                    if abs(err_x) < 15.0 and abs(err_y) < 15.0:
-                        break
-
-                    dyaw = max(-0.04, min(0.04, err_x * 0.0010))
-                    dslide = max(-0.08, min(0.08, err_y * 0.0020))
-                    self.move_arm_smooth(yaw=self.arm_yaw + dyaw, slide=self.arm_slide + dslide, settle_s=0.06)
-
-            grabbed = False
-            for target_lift in [-0.35, -0.55, -0.75, -0.95]:
-                self.move_arm_smooth(lift=target_lift, settle_s=0.35)
-                if self.arm.grab(item, offset=grab_offsets[item]):
-                    grabbed = True
-                    self.grabbed_items.append(item)
-                    self.get_logger().info(f"[PICKUP] BERHASIL GRAB {item} di lift={target_lift}!")
-                    break
-
-            if not grabbed:
-                self.get_logger().error(f"[PICKUP] Gagal grab {item}.")
-
-            self.move_arm_smooth(lift=0.0, settle_s=0.35)
-            self.move_arm_smooth(slide=0.9, lift=0.0, settle_s=0.3)
-
-        self.move_arm_smooth(yaw=0.0, slide=0.9, lift=0.0, settle_s=0.6)
-
-        if len(self.grabbed_items) == 0:
-            self.get_logger().error("=== TIDAK ADA BARANG TERANGKUT! KAPAL DITAHAN DI SPOT 1 ===")
-            return
-
-        self.t0 = self.now()
-        self.mission_phase = 'NAVIGATE'
-        self.get_logger().info(f"=== {len(self.grabbed_items)} BARANG SIAP ({self.grabbed_items}) -> BERANGKAT KE SPOT 2 ===")
-
-    def drop_routine(self):
-        self.get_logger().info("=== MEMULAI FASE DROP DI KOTAK PUTIH SPOT 2 ===")
-        self.move_arm_smooth(yaw=0.0, slide=3.1, lift=0.0, settle_s=0.6)
-        self.move_arm_smooth(lift=-0.50, settle_s=0.5)
-
-        t_start = time.time()
-        while time.time() - t_start < 5.0:
-            det = self.arm_dets.get('slot')
-            if det is None:
-                break
-            w, h = self.arm_frame_size
-            err_x = (w / 2.0) - det[0]
-            err_y = (h / 2.0) - det[1]
-            if abs(err_x) < 18.0 and abs(err_y) < 18.0:
-                break
-            self.move_arm_smooth(
-                yaw=self.arm_yaw + max(-0.04, min(0.04, err_x * 0.001)),
-                slide=self.arm_slide + max(-0.08, min(0.08, err_y * 0.002)),
-                settle_s=0.06
-            )
-
-        drop_yaw_offsets = {
-            'cube':   -0.10,
-            'sphere':  0.00,
-            'prism':  +0.10,
-        }
-        base_yaw = self.arm_yaw
-        for item in self.grabbed_items:
-            self.move_arm_smooth(yaw=base_yaw + drop_yaw_offsets.get(item, 0.0), settle_s=0.4)
-            self.arm.detach(item)
-            self.get_logger().info(f"[DROP] Detach {item} tepat di kotak putih Spot 2")
-            time.sleep(0.4)
-
-        self.move_arm_smooth(lift=0.0, settle_s=0.4)
-        self.move_arm_smooth(yaw=0.0, slide=0.9, lift=0.0, settle_s=0.6)
-        self.mission_phase = 'DONE'
-        self.get_logger().info("=== MISI SELESAI 100% ===")
-
-    # ===================== NAVIGASI BERMUATAN & PARKIR SPOT 2 =====================
-    def cam_cb(self, msg):
-        frame = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
-        h, w, _ = frame.shape
-        fa = float(w * h)
-        F = self.fx if self.fx else w / (2.0 * math.tan(HFOV / 2.0))
-        ann = frame.copy()
-        now = self.now()
-
-        if self.halted:
-            self.set_thrust(0.0, 0.0)
-            self.show(ann, "HALTED", col=(0, 0, 255))
-            return
-
-        if self.mission_phase == 'PICKUP':
-            self.set_thrust(0.0, 0.0)
-            self.show(ann, f"PICKUP ({len(self.grabbed_items)}/3)", col=(255, 255, 0))
-            return
-
-        res = self.model(frame, conf=0.30, verbose=False)[0]
-
-        greens = []
-        reds = []
-        obsts = []
-        sig = []
-        banner_x, banner_a = None, 0.0
-        dock_x, dock_a = None, 0.0
-
-        cols = {'green': (0, 255, 0), 'red': (0, 0, 255),
-                'yellow': (0, 255, 255), 'black': (255, 255, 255)}
-
-        for b in res.boxes:
-            raw = self.model.names[int(b.cls[0])]
-            conf = float(b.conf[0])
-            x1, y1, x2, y2 = b.xyxy[0].tolist()
-            name = self.refine_class(frame, x1, y1, x2, y2, raw)
-            if 'black' not in name and conf < 0.40:
-                continue
-
-            cx = (x1 + x2) / 2.0
-            area = (x2 - x1) * (y2 - y1)
-            area_n = area / fa
-            y2_n = y2 / float(h)
-            sig.append((name, cx, y2))
-
-            ang = math.atan2(cx - w / 2.0, F) + self.cam_offset
-
-            col = next((k for k in cols if k in name), None)
-            bc = cols.get(col, (255, 180, 0))
-            cv2.rectangle(ann, (int(x1), int(y1)), (int(x2), int(y2)), bc, 2)
-            cv2.putText(ann, f"{name} {math.degrees(ang):+.0f}d y={y2_n:.2f}",
-                        (int(x1), max(15, int(y1) - 6)), cv2.FONT_HERSHEY_SIMPLEX, 0.42, bc, 2)
-
-            if col is None:
-                if 'banner' in name and area > banner_a:
-                    banner_a, banner_x = area, cx
-                elif ('dock' in name or 'slot' in name) and area > dock_a:
-                    dock_a, dock_x = area, cx
-                continue
-
-            if area_n < 0.00020:
-                continue
-
-            if col == 'green':
-                greens.append((ang, y2_n, area_n))
-            elif col == 'red':
-                reds.append((ang, y2_n, area_n))
-            else:
-                obsts.append((ang, y2_n, area_n, col))
-
-        self.check_stuck(sig, now)
-        if self.halted:
-            self.show(ann, "HALTED", col=(0, 0, 255))
-            return
-
-        if greens or reds or obsts:
-            self._saw_buoy = True
-            self._clear_t = None
-        elif getattr(self, '_saw_buoy', False) and getattr(self, '_clear_t', None) is None:
-            self._clear_t = now
-
-        ready_to_dock = (getattr(self, '_clear_t', None) is not None) and ((now - self._clear_t) > 1.0)
-        b_ratio = banner_a / fa
-        d_ratio = dock_a / fa
-
-        # ================= 1. FASE PARKIR / REM DI SPOT 2 =================
-        if self.docked:
-            if not self.drop_started:
-                self.drop_started = True
-                self.mission_phase = 'DROP'
-                threading.Thread(target=self.drop_routine, daemon=True).start()
-
-            if banner_x is not None:
-                err_x = (w / 2.0 + DOCK_PX_OFFSET) - banner_x
-                turn = 0.0 if abs(err_x) < 10.0 else max(-18.0, min(18.0, 0.15 * err_x))
-                err_dist = 0.024 - b_ratio
-                hold_fwd = 0.0 if abs(err_dist) < 0.002 else max(-30.0, min(20.0, err_dist * 1200.0))
-                self.set_thrust(hold_fwd - turn, hold_fwd + turn)
-            else:
-                self.set_thrust(0.0, 0.0)
-            self.show(ann, f"DOCKED ({self.mission_phase}) b={b_ratio:.4f}", col=(0, 255, 0))
-            return
-
-        if self.brake > 0 or (ready_to_dock and not greens and not reds and not obsts and (b_ratio > 0.024 or d_ratio > 0.11)):
-            if self.brake < 16:
-                self.set_thrust(-140.0, -140.0)
-                self.brake += 1
-            else:
-                self.set_thrust(0.0, 0.0)
-                self.docked = True
-            self.show(ann, f"BRAKING {self.brake}/16 (b={b_ratio:.4f})", col=(0, 0, 255))
-            return
-
-        # ================= 2. FASE MASUK CERUK U SPOT 2 (LURUS HALUS) =================
-        if ready_to_dock and not greens and not reds and not obsts:
-            if banner_x is not None:
-                err = (w / 2.0 + DOCK_PX_OFFSET) - banner_x
-                turn = max(-22.0, min(22.0, 0.14 * err))
-                fwd = 34.0
-                self.set_thrust(fwd - turn, fwd + turn)
-                self.show(ann, f"DOCKING TO BANNER (b={b_ratio:.4f})", col=(255, 200, 0))
-            else:
-                self.set_thrust(32.0, 32.0)
-                self.show(ann, "DOCKING STRAIGHT IN", col=(255, 200, 0))
-            return
-
-        # ================= 3. KORIDOR NAVIGASI (GREEN KIRI, RED KANAN) =================
-        near_g = max(greens, key=lambda item: item[1]) if greens else None
-        near_r = max(reds, key=lambda item: item[1]) if reds else None
-
-        left_bound = (near_g[0] + BUOY_MARGIN_RAD) if near_g else -0.45
-        right_bound = (near_r[0] - BUOY_MARGIN_RAD) if near_r else +0.45
-
-        if left_bound > right_bound:
-            mid_b = (left_bound + right_bound) / 2.0
-            left_bound = mid_b - 0.05
-            right_bound = mid_b + 0.05
-
-        corridor_mid = (left_bound + right_bound) / 2.0
-
-        # ================= 4. PENGHINDARAN OBSTACLE DINI (KUNING & HITAM) =================
-        active_obs = [o for o in obsts if OBS_ACTIVE_Y <= o[1] <= OBS_PASS_Y]
-        cur_obs = max(active_obs, key=lambda item: item[1]) if active_obs else None
-
-        mode = "CORRIDOR"
-        target_ang = corridor_mid
-
-        if cur_obs is not None:
-            self.obs_lost_frames = 0
-            obs_ang, obs_y, _, obs_col = cur_obs
-
-            if self.locked_avoid_dir is None:
-                if near_r is None and near_g is not None:
-                    self.locked_avoid_dir = 'L'
-                elif near_g is None and near_r is not None:
-                    self.locked_avoid_dir = 'R'
+                    self.log.warn(f"[PICKUP] kamera lengan gagal mengenali barang di {xy}, FALLBACK kelas Gazebo={cls}")
+                    ref = self.poses.get(f"item_{cls}")[:2]
+                if cls in self.loaded:
+                    continue
+                self.log.info(f"[PICKUP] ambil {cls} di ({ref[0]:.2f},{ref[1]:.2f})")
+                if not self.armc.pick(cls, ref, C.DOCK_TOP_Z):
+                    continue
+                w = self.poses.get("wamv")
+                self.pick_boat_xy[cls] = world_to_boat(w, ref)
+                cxy = self.armc.container_world(cls)
+                if self.armc.place(cls, cxy, self.armc.deck_z()):
+                    self.loaded.append(cls)
+                    self.event(f"{cls} masuk kompartemen ({len(self.loaded)}/3)")
                 else:
-                    space_right = right_bound - obs_ang
-                    space_left = obs_ang - left_bound
-                    self.locked_avoid_dir = 'R' if space_right >= space_left else 'L'
+                    self.log.error(f"[PICKUP] {cls} tidak mendarat di kompartemen!")
+            if len(self.loaded) == len(C.ITEMS):
+                break
+        self.armc.stow()
+        if not self.loaded:
+            raise RuntimeError("tidak ada barang yang berhasil diambil")
+        self.event(f"PICKUP selesai: {self.loaded}")
 
-            if self.locked_avoid_dir == 'R':
-                safe_left = obs_ang + OBS_MARGIN_RAD
-                target_ang = max(safe_left, (safe_left + right_bound) / 2.0)
-                target_ang = min(target_ang, right_bound + 0.10)
-                mode = f"AVOID {obs_col.upper()} -> RIGHT"
+    def _loaded_world_xy(self):
+        w = self.poses.get("wamv")
+        return [boat_to_world(w, self.pick_boat_xy[k]) for k in self.loaded if k in self.pick_boat_xy]
+
+    # ------------------------------------------------------------------ FTP + DOCKING
+    def _banner_lateral(self):
+        """Posisi lateral banner (l) = median perpotongan sinar-sinar banner dengan garis dinding Spot 2."""
+        s_wall = C.SPOT_TO_SPOT + C.BANNER_TO_SLOT
+        ls = []
+        for cx, cy, brg in list(self.front.banner_rays):
+            s0, l0 = self.frame.to_sl((cx, cy))
+            a = brg - self.frame.heading
+            if math.cos(a) < 0.2 or s_wall - s0 < 3.0:
+                continue
+            ls.append(l0 + (s_wall - s0) * math.tan(a))
+        if len(ls) < 5:
+            return None
+        return float(np.median(ls))
+
+    def _dock_target(self):
+        """(s, l) pusat slot Spot 2. s dari geometri guidebook (jarak slot-ke-slot), l dari arah banner
+        (visi) bila tersedia. Banner berada di dinding tepat di belakang pusat slot."""
+        lb = self._banner_lateral()
+        if lb is not None and abs(lb) < 5.0:
+            return (C.SPOT_TO_SPOT, lb), "banner"
+        return (C.SPOT_TO_SPOT, 0.0), "prior"
+
+    def _replan(self):
+        w = self.poses.get("wamv")
+        with self.map_lock:
+            self.lmap.merge()
+            end_sl, src = self._dock_target()
+            wps, gates = plan_path(self.lmap, self.frame, (0.0, 0.0), end_sl)
+        xy = [(*self.frame.to_xy(p["s"], p["l"]), p["kind"]) for p in wps]
+        with self.path_lock:
+            self.los.set_path(xy, w[0], w[1])
+        return gates, end_sl, src
+
+    def _check_gates(self, gates, prev_xy, cur_xy):
+        """Catat saat kapal memotong garis gerbang (segmen hijau-merah) dan offset dari tengahnya."""
+        for g in gates:
+            key = f"g{g.green.id}-r{g.red.id}"
+            if key in self.gates_log:
+                continue
+            a, b = np.array(g.green.xy), np.array(g.red.xy)
+            p, q = np.array(prev_xy), np.array(cur_xy)
+            r, s = q - p, b - a
+            den = r[0] * s[1] - r[1] * s[0]
+            if abs(den) < 1e-9:
+                continue
+            t = ((a - p)[0] * s[1] - (a - p)[1] * s[0]) / den
+            u = ((a - p)[0] * r[1] - (a - p)[1] * r[0]) / den
+            if 0 <= t <= 1:
+                inside = 0 <= u <= 1
+                off = (u - 0.5) * g.width
+                self.gates_log[key] = dict(n=len(self.gates_log) + 1, width=round(g.width, 2),
+                                             offset=round(off, 2), inside=bool(inside))
+                lvl = self.log.info if inside else self.log.error
+                lvl(f"[FTP] GERBANG #{len(self.gates_log)} (lebar {g.width:.1f} m) dilewati, "
+                    f"offset dari tengah {off:+.2f} m {'OK' if inside else 'DI LUAR GERBANG!'}")
+
+    def _ftp_and_dock(self):
+        self.event("FTP mulai")
+        self.front_active = True
+        self.pilot.reset()
+        self.u_ref = C.U_CRUISE
+        gates, end_sl, src = self._replan()
+        self.mode = "path"                 # _thrust di mode path mengirim sudut mesin 0 (diferensial biasa)
+        prev = self.poses.get("wamv")[:2]
+        last_log = 0.0
+        t_start = time.time()
+        while True:
+            time.sleep(0.4)
+            if self.killed:
+                continue
+            gates, end_sl, src = self._replan()
+            cur = self.poses.get("wamv")[:2]
+            self._check_gates(gates, prev, cur)
+            prev = cur
+            rem = self.nav_info.get("rem_raw", 1e9)
+            if time.time() - last_log > 2.0:
+                last_log = time.time()
+                with self.map_lock:
+                    nconf = {c: len(self.lmap.confirmed(c)) for c in ("green", "red", "yellow", "black",
+                                                                     "target_banner")}
+                s, l = self.frame.to_sl(cur)
+                self.log.info(f"[FTP] s={s:5.1f} l={l:+5.2f} | gerbang={len(gates)} landmark={nconf} | "
+                              f"dock={src} ({end_sl[0]:.1f},{end_sl[1]:+.2f}) | {self.nav_info}")
+            if rem < C.DOCK_TOL:
+                break
+            if time.time() - t_start > 900:
+                raise RuntimeError("FTP timeout")
+        dock_xy = self.frame.to_xy(*end_sl)
+        self._hold_at(dock_xy[0], dock_xy[1], self.frame.heading)
+        self.wait_until(lambda: abs(self.st.u) < 0.08 and abs(self.nav_info.get("e_f", 9)) < 0.3, 30)
+        w = self.poses.get("wamv")
+        err = math.hypot(w[0] - dock_xy[0], w[1] - dock_xy[1])
+        self.event(f"DOCKED di slot Spot 2 (target {src}), galat posisi {err:.2f} m")
+        self.log.info(f"[FTP] ringkasan gerbang: {list(self.gates_log.values())}")
+        with self.map_lock:
+            for m in sorted(self.lmap.confirmed(), key=lambda m: (m.cls, m.x)):
+                self.log.info(f"[MAP] {m.cls:13s} #{m.id:3d} ({m.x:7.2f},{m.y:7.2f}) hits={m.hits} "
+                              f"min_rng={m.min_rng:.1f}")
+
+    # ------------------------------------------------------------------ UNLOAD + BUZZER + WATER CANNON
+    def _drop_targets(self):
+        w = self.poses.get("wamv")
+        pivot = boat_to_world(w, C.ARM_PIVOT)
+        reach = C.ARM_CARR0 + C.ARM_SLIDE_MAX
+        marks = [m for m in self.overview.marks_near(pivot, reach) if ArmIK.reachable(*world_to_boat(w, m))]
+        self.log.info(f"[UNLOAD] {len(marks)} zona taruh dari overview: "
+                      + ", ".join(f"({x:.2f},{y:.2f})" for x, y in marks))
+        targets, used = {}, set()
+        for k in self.loaded:
+            # Spot 2 = cermin Spot 1: zona taruh barang k ~ posisi ambil dicerminkan di sumbu lintang kapal
+            bx, by = self.pick_boat_xy.get(k, C.CONTAINER_XY[k])
+            prior = boat_to_world(w, (-bx, by))
+            best = None
+            for i, m in enumerate(marks):
+                if i in used:
+                    continue
+                d = math.hypot(m[0] - prior[0], m[1] - prior[1])
+                if d < 2.5 and (best is None or d < best[0]):
+                    best = (d, i)
+            if best is not None:
+                used.add(best[1])
+                targets[k] = marks[best[1]]
             else:
-                safe_right = obs_ang - OBS_MARGIN_RAD
-                target_ang = min(safe_right, (left_bound + safe_right) / 2.0)
-                target_ang = max(target_ang, left_bound - 0.10)
-                mode = f"AVOID {obs_col.upper()} -> LEFT"
-        else:
-            if self.locked_avoid_dir is not None:
-                self.obs_lost_frames += 1
-                if self.obs_lost_frames >= 6:
-                    self.locked_avoid_dir = None
-                    self.obs_lost_frames = 0
+                targets[k] = prior
+                self.log.warn(f"[UNLOAD] zona taruh {k} tidak terlihat di overview, pakai cermin posisi ambil")
+        return targets
 
-        # ================= 5. KENDALI BLIND SESAAT / HALUS =================
-        if greens or reds or obsts:
-            self.last_seen_t = now
-            self.last_target_ang = target_ang
-        elif now - self.last_seen_t < 1.5:
-            target_ang = self.last_target_ang * 0.7
-            mode = "HOLD LAST"
-        else:
-            target_ang = 0.0
-            mode = "SEARCH STRAIGHT"
+    def _banner_bearing_now(self):
+        """Sudut banner dari haluan: deteksi live bila ada; di dalam slot banner terpotong tepi atas gambar,
+        jadi pakai posisi banner yang dipetakan saat mendekat (perpotongan sinar-sinar banner)."""
+        if self.poses.stamp - self.front.banner_t < 1.0 and self.front.banner_bearing is not None:
+            return self.front.banner_bearing, "live"
+        if self._banner_lateral() is None:
+            return None, None
+        w = self.poses.get("wamv")
+        bx, by = world_to_boat(w, self._banner_xyz()[:2])
+        return math.atan2(by, bx), "peta"
 
-        tx = int(w / 2.0 + F * math.tan(target_ang - self.cam_offset))
-        tx = max(0, min(w - 1, tx))
-        cv2.line(ann, (tx, int(h * 0.4)), (tx, h), (255, 255, 0), 3)
-        cv2.line(ann, (int(w / 2), int(h * 0.7)), (int(w / 2), h), (200, 200, 200), 1)
+    def _aim_cannon(self):
+        """Pastikan banner target tepat di depan haluan, koreksi heading tahan bila perlu."""
+        self.front_active = True
+        for _ in range(3):
+            time.sleep(0.5)
+            brg, src = self._banner_bearing_now()
+            if brg is None:
+                self.log.warn("[CANNON] posisi banner tidak diketahui, pakai heading lintasan")
+                return
+            self.log.info(f"[CANNON] sudut banner dari haluan {math.degrees(brg):+.1f} deg ({src})")
+            if abs(brg) < C.BANNER_AIM_TOL:
+                return
+            x0, y0, psi0 = self.keeper.ref
+            self._hold_at(x0, y0, psi0 + brg)
+            self.wait_until(lambda: abs(self.nav_info.get("e_psi_deg", 99)) < 1.0, 8.0)
+            time.sleep(1.0)
 
-        # ================= 6. MIXING THRUSTER KIRI & KANAN (ADAPTIF BEBAN) =================
-        turn = KP_STEER * target_ang
-        turn = max(-MAX_TURN, min(MAX_TURN, turn))
+    def _banner_xyz(self):
+        lb = self._banner_lateral()
+        x, y = self.frame.to_xy(C.SPOT_TO_SPOT + C.BANNER_TO_SLOT, 0.0 if lb is None else lb)
+        return (x, y, C.BANNER_Z)
 
-        speed_factor = 1.0 - min(0.65, abs(target_ang) / 0.50)
-        fwd = MIN_SPEED + (BASE_SPEED - MIN_SPEED) * speed_factor
-        if cur_obs is not None:
-            # Melambat otomatis saat menghindar obstacle agar tidak nyenggol buoy
-            fwd = min(fwd, 32.0 if cur_obs[1] > 0.45 else 40.0)
+    def _fire_effects(self):
+        """Dipanggil TEPAT saat barang terakhir dilepas."""
+        w = self.poses.get("wamv")
+        self.pub_buzzer.publish(Bool(data=True))
+        self.pub_cannon.publish(Bool(data=True))
+        print("\a", end="", flush=True)
+        self.aux.buzzer_marker(w)
+        self.aux.water_jet(w, self._banner_xyz())
+        self.event("BUZZER ON + WATER CANNON ON (barang terakhir ditaruh)")
 
-        self.set_thrust(fwd + turn, fwd - turn)
+        def _off():
+            time.sleep(max(C.BUZZER_TIME, C.CANNON_TIME))
+            self.pub_buzzer.publish(Bool(data=False))
+            self.pub_cannon.publish(Bool(data=False))
+            self.aux.clear()
+            self.event("BUZZER OFF + WATER CANNON OFF")
+        threading.Thread(target=_off, daemon=True).start()
 
-        dbg = (f"G={len(greens)} R={len(reds)} O={len(obsts)} | "
-               f"ang={math.degrees(target_ang):+.1f}deg")
-        self.show(ann, mode, dbg)
+    def _unload(self):
+        self._hold_here(self.keeper.ref[2] if self.keeper.ref else None)
+        if not self.loaded:
+            self.log.warn("[UNLOAD] tidak ada barang di kapal")
+            self._aim_cannon()
+            self._fire_effects()
+            return
+        self.event("UNLOAD mulai")
+        self._aim_cannon()
+        targets = self._drop_targets()
+        # zona taruh di-refine SEKARANG selagi gripper kosong (barang yang dibawa menutupi kamera gripper)
+        for k in list(targets):
+            mxy, _ = self.armc.refine("mark", targets[k], C.DOCK_TOP_Z, max_jump=1.5)
+            if mxy is not None:
+                targets[k] = mxy
+        self.armc.move(lift=0.0)
+        deck_z = self.armc.deck_z()
+        order = list(self.loaded)
+        for i, k in enumerate(order):
+            last = i == len(order) - 1
+            cxy = self.armc.container_world(k)
+            ref, cls = self.armc.refine(k, cxy, deck_z + 0.7 * C.ITEM, max_jump=0.7)
+            if cls is None:
+                ref = cxy
+            if not self.armc.pick(k, ref, deck_z):
+                self.log.error(f"[UNLOAD] gagal mengambil {k} dari kompartemen")
+                continue
+            mxy = targets[k]
+            if last:
+                self._place_and_fire(k, mxy)
+            elif self.armc.place(k, mxy, C.DOCK_TOP_Z):
+                self.placed.append(k)
+                self.event(f"{k} ditaruh di Spot 2 ({len(self.placed)}/{len(order)})")
+        self.armc.stow()
+
+    def _place_and_fire(self, k, mxy):
+        """Taruh barang terakhir; efek dipicu tepat setelah detach (bukan menunggu lengan naik)."""
+        orig_detach = self.arm.detach
+
+        def detach_and_fire(item):
+            orig_detach(item)
+            self._fire_effects()
+        self.arm.detach = detach_and_fire
+        try:
+            ok = self.armc.place(k, mxy, C.DOCK_TOP_Z)
+        finally:
+            self.arm.detach = orig_detach
+        if ok:
+            self.placed.append(k)
+            self.event(f"{k} ditaruh di Spot 2 ({len(self.placed)}/{len(self.loaded)}) - BARANG TERAKHIR")
 
 
 def main():
     rclpy.init()
-    node = ASV()
+    node = ASVMission()
+    ex = MultiThreadedExecutor(num_threads=4)
+    ex.add_node(node)
     try:
-        rclpy.spin(node)
+        ex.spin()
     except KeyboardInterrupt:
-        node.set_thrust(0.0, 0.0)
+        pass
     finally:
-        cv2.destroyAllWindows()
+        try:
+            node._thrust(0.0, 0.0)
+        except Exception:  # noqa: BLE001  (context ROS sudah ditutup oleh sinyal)
+            pass
         node.destroy_node()
-        rclpy.shutdown()
+        rclpy.try_shutdown()
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

@@ -434,7 +434,7 @@
       <static>false</static>
       <pose>-55.5000 0.0000 1.6250 0 0 0.0</pose>
       <link name="link">
-        <inertial><mass>18.7500</mass><inertia><ixx>1.757812</ixx><iyy>1.757812</iyy><izz>1.757812</izz></inertia></inertial>
+        <inertial><mass>0.0500</mass><inertia><ixx>0.004688</ixx><iyy>0.004688</iyy><izz>0.004688</izz></inertia></inertial>
         <visual name="v0"><pose>0.0000 0.0000 0.0000 0 0 0</pose><geometry><box><size>0.7500 0.7500 0.7500</size></box></geometry><material><ambient>0.95 0.76 0.19 1.0</ambient><diffuse>0.95 0.76 0.19 1.0</diffuse></material></visual>
         <collision name="c0"><pose>0.0000 0.0000 0.0000 0 0 0</pose><geometry><box><size>0.7500 0.7500 0.7500</size></box></geometry></collision>
       </link>
@@ -450,7 +450,7 @@
       <static>false</static>
       <pose>-49.0000 5.0000 1.6250 0 0 0.0</pose>
       <link name="link">
-        <inertial><mass>18.7500</mass><inertia><ixx>1.757812</ixx><iyy>1.757812</iyy><izz>1.757812</izz></inertia></inertial>
+        <inertial><mass>0.0500</mass><inertia><ixx>0.004688</ixx><iyy>0.004688</iyy><izz>0.004688</izz></inertia></inertial>
         <visual name="v0"><pose>0.0000 0.0000 0.0000 0 0 0</pose><geometry><sphere><radius>0.3750</radius></sphere></geometry><material><ambient>0.95 0.76 0.19 1.0</ambient><diffuse>0.95 0.76 0.19 1.0</diffuse></material></visual>
         <collision name="c0"><pose>0.0000 0.0000 0.0000 0 0 0</pose><geometry><sphere><radius>0.3750</radius></sphere></geometry></collision>
       </link>
@@ -466,7 +466,7 @@
       <static>false</static>
       <pose>-49.0000 -5.0000 1.6250 0 0 0.0</pose>
       <link name="link">
-        <inertial><mass>18.7500</mass><inertia><ixx>1.757812</ixx><iyy>1.757812</iyy><izz>1.757812</izz></inertia></inertial>
+        <inertial><mass>0.0500</mass><inertia><ixx>0.004688</ixx><iyy>0.004688</iyy><izz>0.004688</izz></inertia></inertial>
         <visual name="v0"><pose>0.0000 0.3750 -0.3750 1.5708 0 0</pose><geometry><polyline><point>-0.3750 0</point><point>0.3750 0</point><point>0 0.7500</point><height>0.7500</height></polyline></geometry><material><ambient>0.95 0.76 0.19 1.0</ambient><diffuse>0.95 0.76 0.19 1.0</diffuse></material></visual>
         <collision name="c0"><pose>0.0000 0.3750 -0.3750 1.5708 0 0</pose><geometry><polyline><point>-0.3750 0</point><point>0.3750 0</point><point>0 0.7500</point><height>0.7500</height></polyline></geometry></collision>
       </link>

@@ -10,6 +10,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from figs import CFG, ITEM_SPOTS, layout
 
 WORLD_NAME = "pengiriman_kapal_otonom"
+ITEM_MASS = 0.05   # kg, massa ABSOLUT barang (tidak ikut dikali skala^3)
 RED, GRN, YEL, BLK, WHT, WOOD = (0.82, 0.2, 0.17), (0.18, 0.62, 0.31), (0.95, 0.76, 0.19), (0.1, 0.1, 0.1), (0.95, 0.95, 0.95), (0.55, 0.43, 0.31)
 
 
@@ -25,13 +26,13 @@ class W:
     def f(self, v):
         return f"{v * self.s:.4f}"
 
-    def model(self, name, x, y, z, shapes, static=True, mass=None, yaw=0.0, collide=True):
+    def model(self, name, x, y, z, shapes, static=True, mass=None, yaw=0.0, collide=True, abs_mass=False):
         """shapes: list of (kind, dims, (dx,dy,dz), color). Ukuran dalam meter skala 1."""
         s = self
         o = [f'    <model name="{name}">', f'      <static>{"true" if static else "false"}</static>',
              f'      <pose>{s.f(x)} {s.f(y)} {s.f(z)} 0 0 {yaw}</pose>', '      <link name="link">']
         if mass is not None:
-            m = mass * s.s ** 3
+            m = mass if abs_mass else mass * s.s ** 3
             ii = m * 0.00375 * s.s ** 2   # kubus sisi 0,15 m x skala: I = m L^2 / 6
             o.append(f'        <inertial><mass>{m:.4f}</mass><inertia><ixx>{ii:.6f}</ixx><iyy>{ii:.6f}</iyy><izz>{ii:.6f}</izz></inertia></inertial>')
         for i, sh in enumerate(shapes):
@@ -87,11 +88,11 @@ def build(scale, vrx_world):
     for kind, ix, iy in ITEM_SPOTS:
         X, Y = ix - ox, iy
         if kind == "cube":
-            w.model("item_cube", X, Y, DOCK_TOP + it / 2, [("box", (it, it, it), (0, 0, 0), YEL)], static=False, mass=0.15)
+            w.model("item_cube", X, Y, DOCK_TOP + it / 2, [("box", (it, it, it), (0, 0, 0), YEL)], static=False, mass=ITEM_MASS, abs_mass=True)
         elif kind == "sphere":
-            w.model("item_sphere", X, Y, DOCK_TOP + it / 2, [("sph", (it / 2,), (0, 0, 0), YEL)], static=False, mass=0.15)
+            w.model("item_sphere", X, Y, DOCK_TOP + it / 2, [("sph", (it / 2,), (0, 0, 0), YEL)], static=False, mass=ITEM_MASS, abs_mass=True)
         else:
-            w.model("item_prism", X, Y, DOCK_TOP + it / 2, [("prism", (it, it, it), (0, it / 2, -it / 2), YEL, (1.5708, 0, 0))], static=False, mass=0.15)
+            w.model("item_prism", X, Y, DOCK_TOP + it / 2, [("prism", (it, it, it), (0, it / 2, -it / 2), YEL, (1.5708, 0, 0))], static=False, mass=ITEM_MASS, abs_mass=True)
         w.model(f"drop_mark_{kind}", ox - ix, Y, DOCK_TOP + 0.005, [("box", (it * 1.6, it * 1.6, 0.01), (0, 0, 0), WHT)], collide=False)
 
     # Jalur FTP: baris hijau (sisi kiri) dan merah (sisi kanan). Gerbang = pasangan sempit, penanda jalur = pasangan lebih lebar

@@ -108,11 +108,11 @@ def item_sdf(k):
     it = MW.CFG["item"]
     YEL = MW.YEL
     if k == "cube":
-        w.model("item_cube", 0, 0, 0, [("box", (it, it, it), (0, 0, 0), YEL)], static=False, mass=0.15)
+        w.model("item_cube", 0, 0, 0, [("box", (it, it, it), (0, 0, 0), YEL)], static=False, mass=MW.ITEM_MASS, abs_mass=True)
     elif k == "sphere":
-        w.model("item_sphere", 0, 0, 0, [("sph", (it / 2,), (0, 0, 0), YEL)], static=False, mass=0.15)
+        w.model("item_sphere", 0, 0, 0, [("sph", (it / 2,), (0, 0, 0), YEL)], static=False, mass=MW.ITEM_MASS, abs_mass=True)
     else:
-        w.model("item_prism", 0, 0, 0, [("prism", (it, it, it), (0, it / 2, -it / 2), YEL, (1.5708, 0, 0))], static=False, mass=0.15)
+        w.model("item_prism", 0, 0, 0, [("prism", (it, it, it), (0, it / 2, -it / 2), YEL, (1.5708, 0, 0))], static=False, mass=MW.ITEM_MASS, abs_mass=True)
     return "<?xml version='1.0'?><sdf version='1.9'>" + "\n".join(w.out) + "</sdf>"
 
 
